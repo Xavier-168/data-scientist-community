@@ -4,6 +4,22 @@ Data Scientist Community is a local-first macOS tool that helps creators collect
 
 This is an independent community project. It is not affiliated with, endorsed by, or officially partnered with any supported platform or Feishu.
 
+## A note from the creator
+
+Hi! I am Xiaoyao, the technology creator behind **Zhao Xiaoyao Xavier** on Douyin. This is the first repository I have published on GitHub. Since becoming a Vibe Coder, I have spent almost every day building tools and workflows that solve real problems in my own work.
+
+Data Scientist Community is one of those projects, and I believe it can also help other creators who want to understand their content through data.
+
+As a full-time OPC (one-person company) founder, I need to review my own content continuously: what worked, what did not, and what I should change next. I wanted to bring detailed data from each creator platform into my own Feishu workspace and analyze it through a unified dashboard.
+
+The difficulty is that every platform uses different metrics, fields, and definitions. To make meaningful comparisons possible, I manually mapped and aligned the core fields from Douyin, Xiaohongshu, Bilibili, and Kuaishou, then normalized them into a shared structure for review and analysis.
+
+The current release supports macOS first, with a Windows version planned. If this project helps you, please consider giving it a Star and sharing your real-world feedback.
+
+You can learn more about me, my recorded courses, and my knowledge base on my one-person company website: [https://zhaoxiaoyao.com](https://zhaoxiaoyao.com). The open-source project is independent from the learning resources and commercial services on that website; any paid offering will be clearly identified there.
+
+See you there!
+
 ## Highlights
 
 - Four community adapters: Douyin, Xiaohongshu, Bilibili, and Kuaishou.
