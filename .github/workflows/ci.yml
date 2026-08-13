@@ -56,12 +56,22 @@ jobs:
           npm ci --prefix desktop
           npx playwright install chromium
 
-      - name: Run complete test suite
+      - name: Run portable test suite
         env:
           PYTHONDONTWRITEBYTECODE: "1"
-          RUST_TEST_THREADS: "1"
           YIRENGONGIS_STATE_DIR: ${{ runner.temp }}/community-state
-        run: npm test
+        run: |
+          npm run test:legacy
+          npm run test:desktop:web
+          npm run test:desktop:build
+          node scripts/run_rust_tool.mjs cargo test \
+            --manifest-path desktop/src-tauri/Cargo.toml \
+            --locked \
+            --all-features \
+            -- \
+            --skip 'sidecar::tests::'
+          node scripts/test_rust_tool_signal.mjs
+          npm run test:desktop:smoke
 
       - name: Scan working tree and Git history
         run: >-
