@@ -165,7 +165,7 @@
   },
   "source_snapshot": {
     "base_commit": "be26103a6d91492a6730833fbd61261dd249a34d",
-    "content_sha256": "6767e8e3a19635b5b7519c2a53746a54d4390c6384fbf428a9781a4dd16b4c96",
+    "content_sha256": "004deba3d9766048e24f8221d180edc5031950cefbce3de92d6538911b201a0e",
     "inputs_dirty_against_base_commit": true,
     "kind": "working_tree"
   },
@@ -175,7 +175,7 @@
     ".github/ISSUE_TEMPLATE/config.yml": "efcb02ef0b0ac3d53f2d5c50ffb3a3ab890579e846f98ee51cbf459d47fbceea",
     ".github/ISSUE_TEMPLATE/feature_request.yml": "72f2f1b04efff093904d9c47fe61abf4a3c57a960bd19d35c3e0f97980e7aa45",
     ".github/PULL_REQUEST_TEMPLATE.md": "fd875e0f32c9bb6a3ba1c73fb70c79c963347754ff9f656d6f543b4c66430d58",
-    ".github/workflows/ci.yml": "865c7e1a65342e081d9873f8f192f34d278f3d249367a9a28bf824a55bf59f4d",
+    ".github/workflows/ci.yml": "c272bd3e16cee94531c23826ac5aadc1af6b4d0144879197b1fd35a231f9fd6a",
     ".gitignore": "1f9655addb92a093e94314243f4eda8ea089c0ada4a3b4e32757487b21877f03",
     "AUDIT_REPORT.md": "3dc1575309332897a26521fb1b28a955ad4c656964e5daea98b31efadfc1f2b4",
     "CHANGELOG.md": "af29f2ce7c56cb4cc9ebb824eb6ab7c3774a7a64fa37db0743bb57b1061cd565",

@@ -61,7 +61,9 @@ jobs:
           PYTHONDONTWRITEBYTECODE: "1"
           YIRENGONGIS_STATE_DIR: ${{ runner.temp }}/community-state
         run: |
-          npm run test:legacy
+          npm run test:public
+          npm run test:frontend
+          npm run test:python
           npm run test:desktop:web
           npm run test:desktop:build
           node scripts/run_rust_tool.mjs cargo test \
