@@ -436,9 +436,11 @@ function findLargestArrayDeep(value, depth = 0) {
   return best;
 }
 
-function extractItems(payload) {
-  if (!payload) return { items: [], total: 0 };
-  if (Array.isArray(payload)) return { items: payload, total: payload.length };
+export function extractKuaishouListPage(payload, pageIndex = 0, pageSize = 10) {
+  if (!payload) return { items: [], total: 0, hasMore: false };
+  if (Array.isArray(payload)) {
+    return { items: payload, total: payload.length, hasMore: payload.length >= pageSize };
+  }
   const data = payload.data ?? payload;
   const items = Array.isArray(data?.photoList?.photoItems)
     ? data.photoList.photoItems
@@ -451,7 +453,7 @@ function extractItems(payload) {
           : Array.isArray(data?.works)
             ? data.works
             : findLargestArray(data) ?? findLargestArrayDeep(data) ?? [];
-  const total = toNumber(
+  const declaredTotal = toNumber(
     data?.photoList?.totalCount
     ?? data?.photoList?.total_count
     ?? data?.totalCount
@@ -460,8 +462,54 @@ function extractItems(payload) {
     ?? data?.count
     ?? payload?.total
     ?? payload?.totalCount,
-  ) || items.length;
+  );
+  const total = declaredTotal || items.length;
+  const hasMore = declaredTotal > 0
+    ? (pageIndex + 1) * pageSize < declaredTotal
+    : items.length >= pageSize;
+  return { items, total, hasMore };
+}
+
+function extractItems(payload) {
+  const { items, total } = extractKuaishouListPage(payload);
   return { items, total };
+}
+
+export function shouldStopKuaishouPagination({
+  pageItems = 0,
+  collected = 0,
+  limit = 0,
+  hasMore = null,
+  reachedDateBoundary = false,
+} = {}) {
+  if (limit > 0 && collected >= limit) return true;
+  if (reachedDateBoundary) return true;
+  if (hasMore === true) return false;
+  return pageItems <= 0 || hasMore === false;
+}
+
+async function scrollKuaishouWorkList(page) {
+  return page.evaluate(() => {
+    const candidates = Array.from(document.querySelectorAll('*'))
+      .filter((element) => {
+        const style = window.getComputedStyle(element);
+        const rect = element.getBoundingClientRect();
+        return /(auto|scroll)/u.test(style.overflowY)
+          && element.scrollHeight > element.clientHeight + 50
+          && rect.width > 160
+          && rect.height > 160;
+      })
+      .sort((left, right) => right.scrollHeight - left.scrollHeight);
+    const target = candidates[0] || document.scrollingElement || document.documentElement;
+    const before = target.scrollTop;
+    target.scrollTo(0, target.scrollHeight);
+    target.dispatchEvent(new Event('scroll', { bubbles: true }));
+    return {
+      changed: target.scrollTop > before,
+      atBottom: target.scrollTop + target.clientHeight >= target.scrollHeight - 10,
+      channel: target === document.scrollingElement ? 'document' : String(target.className || target.tagName),
+    };
+  });
 }
 
 function normalizeItem(item) {
@@ -1139,6 +1187,11 @@ async function scrapeWorks(context, page) {
 
   page = await ensureOnWorksPage(context, page);
   await page.waitForTimeout(4500);
+  const realScroll = await scrollKuaishouWorkList(page);
+  await page.waitForTimeout(900);
+  if (!realScroll.changed && !realScroll.atBottom) {
+    throw new Error('快手作品列表真实滚动容器未生效，已停止以避免首屏误判');
+  }
 
   const waitDeadline = Date.now() + 25000;
   while ((!initialPayload || !apiPh) && Date.now() < waitDeadline) {
@@ -1160,7 +1213,7 @@ async function scrapeWorks(context, page) {
 
   await updateProgress({
     phase: 'collecting',
-    message: `已捕获作品分析接口，开始分页拉取（预计 ${targetTotal || totalCount || '未知'} 条）`,
+    message: `已确认页面滚动容器${realScroll.changed ? '已移动' : '已在底部'}与作品接口，开始分页拉取（预计 ${targetTotal || totalCount || '未知'} 条）`,
     totalWorks: targetTotal || totalCount || 0,
     processedWorks: rowsById.size,
     successWorks: rowsById.size,
@@ -1177,11 +1230,15 @@ async function scrapeWorks(context, page) {
 
     const before = rowsById.size;
     const payload = pageIndex === 0 ? initialPayload : await fetchArticleListPage(page, apiPh, pageIndex, pageSize);
-    const { items, total } = extractItems(payload);
+    const { items, total, hasMore } = extractKuaishouListPage(payload, pageIndex, pageSize);
     totalCount = total || totalCount;
+    let reachedDateBoundary = false;
+    const minPublishTs = parseDateValue(CONFIG.minPublishDate);
     for (const item of items) {
       const row = normalizeArticleItem(item);
       if (!row) continue;
+      const publishTs = parseDateValue(row.发布日期);
+      if (minPublishTs && publishTs && publishTs < minPublishTs) reachedDateBoundary = true;
       if (!meetsDateRange(row.发布日期)) continue;
       rowsById.set(row.作品ID, row);
     }
@@ -1190,7 +1247,7 @@ async function scrapeWorks(context, page) {
 
     await updateProgress({
       phase: 'collecting',
-      message: `作品分析分页拉取中：第 ${pageIndex + 1} 页，新增 ${newCount} 条，累计 ${rowsById.size}`,
+      message: `作品分析分页拉取中：第 ${pageIndex + 1} 页，新增 ${newCount} 条，累计 ${rowsById.size}${hasMore ? '，接口显示仍有下一页' : ''}`,
       totalWorks: targetTotal || totalCount || rowsById.size,
       processedWorks: rowsById.size,
       successWorks: rowsById.size,
@@ -1198,7 +1255,13 @@ async function scrapeWorks(context, page) {
       currentIndex: rowsById.size,
     });
 
-    if (items.length <= 0) break;
+    if (shouldStopKuaishouPagination({
+      pageItems: items.length,
+      collected: rowsById.size,
+      limit: CONFIG.videoLimit,
+      hasMore,
+      reachedDateBoundary,
+    })) break;
     if (pageIndex > 0) {
       await page.waitForTimeout(500 + Math.floor(Math.random() * 500));
     }

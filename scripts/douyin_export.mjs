@@ -385,6 +385,55 @@ export function buildFinalCompletionPatch(metrics = {}, availableMergedCount = 0
   };
 }
 
+export function extractDouyinWorkListPage(json = {}) {
+  const data = json?.data && typeof json.data === 'object' ? json.data : json;
+  const items = data?.items || data?.aweme_list || data?.list || [];
+  const nextCursor = data?.max_cursor ?? data?.next_cursor ?? null;
+  const total = Number.parseInt(data?.total ?? data?.total_count ?? '0', 10) || 0;
+  return {
+    items: Array.isArray(items) ? items : [],
+    hasMore: Boolean(data?.has_more ?? data?.hasMore),
+    nextCursor,
+    total,
+  };
+}
+
+export function shouldStopDouyinListScan({
+  eligibleCount = 0,
+  limit = 0,
+  staleRounds = 0,
+  staleRoundsLimit = 3,
+  apiHasMore = null,
+  apiReachedDateBoundary = false,
+} = {}) {
+  if (limit > 0 && eligibleCount >= limit && staleRounds >= 1) return true;
+  if (apiReachedDateBoundary) return true;
+  if (apiHasMore === true) return false;
+  return staleRounds >= staleRoundsLimit;
+}
+
+async function scrollDouyinWorkList(page, cardLocator) {
+  const lastCard = cardLocator.last();
+  if ((await lastCard.count().catch(() => 0)) > 0) {
+    await lastCard.scrollIntoViewIfNeeded().catch(() => {});
+  }
+  const scrolled = await page.evaluate(() => {
+    const candidates = Array.from(document.querySelectorAll('*')).filter((element) => {
+      const style = window.getComputedStyle(element);
+      return /(auto|scroll)/u.test(style.overflowY) && element.scrollHeight > element.clientHeight + 50;
+    });
+    const target = candidates.sort((left, right) => right.scrollHeight - left.scrollHeight)[0];
+    if (!target) return false;
+    target.scrollTop = target.scrollHeight;
+    target.dispatchEvent(new Event('scroll', { bubbles: true }));
+    return true;
+  }).catch(() => false);
+  if (!scrolled) {
+    await page.mouse.wheel(0, 4000);
+    await page.evaluate(() => window.scrollTo(0, document.documentElement.scrollHeight)).catch(() => {});
+  }
+}
+
 async function visibleMarkerExists(page, selector) {
   const locator = page.locator(selector);
   const count = await locator.count();
@@ -768,6 +817,11 @@ async function exportRecentWorksFromList(context, page, limit, onProgress = asyn
   const mergedFiles = [];
   const state = await loadState();
   const processedIds = state.ids;
+  let apiHasMore = null;
+  let apiNextCursor = null;
+  let apiTotal = 0;
+  let apiReachedDateBoundary = false;
+  let responseCount = 0;
 
   const parseWorkListResponse = async (response) => {
     const url = response.url();
@@ -783,7 +837,17 @@ async function exportRecentWorksFromList(context, page, limit, onProgress = asyn
     } catch {
       return;
     }
-    const items = json?.items || json?.aweme_list || json?.data?.list || [];
+    const parsedPage = extractDouyinWorkListPage(json);
+    const items = parsedPage.items;
+    apiHasMore = parsedPage.hasMore;
+    apiNextCursor = parsedPage.nextCursor;
+    apiTotal = Math.max(apiTotal, parsedPage.total);
+    const minPublishTs = parseDateValue(CONFIG.minPublishDate);
+    const cursorTs = Number.parseInt(String(apiNextCursor ?? ''), 10);
+    apiReachedDateBoundary = Boolean(
+      minPublishTs && Number.isFinite(cursorTs) && cursorTs > 100000000000 && cursorTs < minPublishTs
+    );
+    responseCount += 1;
     for (const item of items) {
       const id = String(item?.id || item?.aweme_id || item?.item_id || item?.group_id || '');
       if (!id) continue;
@@ -823,8 +887,11 @@ async function exportRecentWorksFromList(context, page, limit, onProgress = asyn
     currentTitle: '',
   });
 
-  let stableRounds = 0;
+  const scanState = { stableRounds: 0 };
   let lastCount = 0;
+  let lastWorkItemCount = 0;
+  let lastResponseCount = 0;
+  let lastCursor = null;
 
   while (true) {
     const cards = page.locator(SELECTORS.videoCard);
@@ -853,29 +920,41 @@ async function exportRecentWorksFromList(context, page, limit, onProgress = asyn
       meetsDateRange(item.publishDate)
     ).length;
 
-    if (eligibleCount >= limit && stableRounds >= 1) {
+    if (shouldStopDouyinListScan({
+      eligibleCount,
+      limit,
+      staleRounds: scanState.staleRounds,
+      staleRoundsLimit: CONFIG.staleRoundsLimit,
+      apiHasMore,
+      apiReachedDateBoundary,
+    })) {
       break;
     }
 
-    if (count === lastCount) {
-      stableRounds += 1;
+    const hasNewListData =
+      workItems.size > lastWorkItemCount ||
+      responseCount > lastResponseCount ||
+      (apiNextCursor != null && apiNextCursor !== lastCursor);
+    if (count === lastCount && !hasNewListData) {
+      scanState.staleRounds += 1;
     } else {
-      stableRounds = 0;
+      scanState.staleRounds = 0;
     }
 
-    if (stableRounds >= CONFIG.staleRoundsLimit) {
-      console.log('[list] 无法加载更多作品，停止滚动。');
+    if (scanState.staleRounds >= CONFIG.staleRoundsLimit && apiHasMore !== true) {
+      console.log('[list] 平台已无更多作品，停止扫描。');
       break;
     }
 
     lastCount = count;
-    await page.mouse.wheel(0, 2400);
-    await page.waitForTimeout(1200);
-    await page.evaluate(() => window.scrollBy(0, window.innerHeight * 0.9));
-    await page.waitForTimeout(1200);
+    lastWorkItemCount = workItems.size;
+    lastResponseCount = responseCount;
+    lastCursor = apiNextCursor;
+    await scrollDouyinWorkList(page, cards);
+    await page.waitForTimeout(2500);
     await onProgress({
       phase: 'collecting',
-      message: `扫描中，已发现 ${workItems.size} 条作品`,
+      message: `扫描中，已发现 ${workItems.size}${apiTotal > 0 ? ` / 平台共 ${apiTotal}` : ''} 条作品`,
       currentIndex: 0,
       currentWorkId: '',
       currentTitle: '',
@@ -1218,6 +1297,7 @@ async function main() {
     });
   } catch (error) {
     console.error(`[error] ${error.message}`);
+    if (error?.stack) console.error(error.stack);
     if (page) {
       const screenshotPath = path.join(CONFIG.downloadDir, `error-${Date.now()}.png`);
       try {

@@ -36,6 +36,25 @@ async function main() {
     mod.buildOfficialBatchError(1, new Error("选择数量异常")).message,
     "official_batch_failed:2:选择数量异常"
   );
+  assert.strictEqual(
+    mod.shouldStopBilibiliTargetScroll({
+      found: 9,
+      target: 12,
+      scrollChanged: false,
+      atBottom: true,
+      reachedDateBoundary: false,
+      stableRounds: 10,
+    }),
+    false,
+    "未到接口目标日期边界时，弹窗暂时滚不动也不得早停"
+  );
+  assert.strictEqual(
+    mod.shouldStopBilibiliTargetScroll({
+      found: 12,
+      target: 12,
+    }),
+    true
+  );
 }
 
 main().catch((error) => {

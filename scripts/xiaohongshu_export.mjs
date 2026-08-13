@@ -792,6 +792,43 @@ function normalizeApiRow(note) {
   };
 }
 
+export function extractXiaohongshuListPage(payload = {}, responseUrl = '') {
+  const data = payload?.data && typeof payload.data === 'object' ? payload.data : {};
+  const notes = Array.isArray(data.notes)
+    ? data.notes
+    : (Array.isArray(data.note_infos) ? data.note_infos : []);
+  const total = Number.parseInt(data.total ?? 0, 10) || 0;
+  let pageNum = 0;
+  let pageSize = 0;
+  try {
+    const parsedUrl = new URL(responseUrl);
+    pageNum = Number.parseInt(parsedUrl.searchParams.get('page_num') ?? '0', 10) || 0;
+    pageSize = Number.parseInt(parsedUrl.searchParams.get('page_size') ?? '0', 10) || 0;
+  } catch {
+    // Some test fixtures and future endpoints may omit a full response URL.
+  }
+  const hasMore = total > 0 && pageNum > 0 && pageSize > 0
+    ? pageNum * pageSize < total
+    : null;
+  return { notes, total, pageNum, pageSize, hasMore };
+}
+
+export function shouldStopXiaohongshuListScan({
+  discovered = 0,
+  limit = 0,
+  stableRounds = 0,
+  staleRoundsLimit = 6,
+  expectedTotal = 0,
+  apiHasMore = null,
+  apiReachedDateBoundary = false,
+} = {}) {
+  if (limit > 0 && discovered >= limit && stableRounds >= 1) return true;
+  if (apiReachedDateBoundary && stableRounds >= 1) return true;
+  if (apiHasMore === true) return false;
+  if (expectedTotal > 0 && discovered >= expectedTotal && stableRounds >= 2) return true;
+  return stableRounds >= staleRoundsLimit;
+}
+
 function mergeFoundRows(domFound, apiFound) {
   const merged = new Map(domFound);
   for (const [workId, apiRow] of apiFound.entries()) {
@@ -1256,6 +1293,9 @@ async function scrapeNotes(context, page) {
   const domFound = new Map();
   const apiFound = new Map();
   let apiTotal = 0;
+  let apiPageSize = 0;
+  let apiMaxPageNum = 0;
+  let apiReachedDateBoundary = false;
   const mergedFound = () => {
     return mergeFoundRows(domFound, apiFound);
   };
@@ -1267,14 +1307,21 @@ async function scrapeNotes(context, page) {
     if (response.status() !== 200) return;
     try {
       const payload = await response.json();
-      const notes = Array.isArray(payload?.data?.notes)
-        ? payload.data.notes
-        : (Array.isArray(payload?.data?.note_infos) ? payload.data.note_infos : []);
-      const total = Number.parseInt(payload?.data?.total ?? 0, 10);
-      if (Number.isFinite(total) && total > 0) {
-        apiTotal = Math.max(apiTotal, total);
+      const parsedPage = extractXiaohongshuListPage(payload, url);
+      if (parsedPage.total > 0) {
+        apiTotal = Math.max(apiTotal, parsedPage.total);
       }
-      for (const note of notes) {
+      if (parsedPage.pageSize > 0) apiPageSize = parsedPage.pageSize;
+      if (parsedPage.pageNum > 0) apiMaxPageNum = Math.max(apiMaxPageNum, parsedPage.pageNum);
+      const minPublishTs = parseDateValue(CONFIG.minPublishDate);
+      if (minPublishTs && parsedPage.notes.some((note) => {
+        const publishDate = formatDateFromTimestamp(note?.post_time || note?.publish_time);
+        const publishTs = parseDateValue(publishDate);
+        return publishTs && publishTs < minPublishTs;
+      })) {
+        apiReachedDateBoundary = true;
+      }
+      for (const note of parsedPage.notes) {
         const row = normalizeApiRow(note);
         if (!row) continue;
         apiFound.set(row['作品ID'], row);
@@ -1311,6 +1358,9 @@ async function scrapeNotes(context, page) {
     const discovered = sourceFound.size;
     const target = expectedTotal || Math.max(discovered, CONFIG.videoLimit || 0);
     const queued = Math.max(0, target - discovered);
+    const apiHasMore = apiTotal > 0 && apiPageSize > 0 && apiMaxPageNum > 0
+      ? apiMaxPageNum * apiPageSize < apiTotal
+      : null;
 
     await updateProgress({
       phase: 'collecting',
@@ -1326,11 +1376,15 @@ async function scrapeNotes(context, page) {
       currentTitle: '',
     });
 
-    const reachedLimit = CONFIG.videoLimit > 0 && discovered >= CONFIG.videoLimit;
-    const reachedTotal = expectedTotal > 0 && discovered >= expectedTotal;
-    if ((reachedLimit && stableRounds >= 1)
-      || (reachedTotal && stableRounds >= 2)
-      || stableRounds >= CONFIG.staleRoundsLimit) {
+    if (shouldStopXiaohongshuListScan({
+      discovered,
+      limit: CONFIG.videoLimit,
+      stableRounds,
+      staleRoundsLimit: CONFIG.staleRoundsLimit,
+      expectedTotal,
+      apiHasMore,
+      apiReachedDateBoundary,
+    })) {
       break;
     }
 

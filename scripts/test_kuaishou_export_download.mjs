@@ -8,9 +8,11 @@ process.env.KS_DETAIL_EXPORT_DIR = tempDir;
 
 const {
   extractKuaishouExportTaskId,
+  extractKuaishouListPage,
   extractKuaishouTitle,
   isExpectedKuaishouExportCreateResponse,
   saveCompletedExportTask,
+  shouldStopKuaishouPagination,
   waitForUniqueNewCompletedExportTask,
 } = await import('./kuaishou_export.mjs');
 
@@ -209,6 +211,24 @@ try {
   });
   assert.equal(isExpectedKuaishouExportCreateResponse(responseFor('work-456'), 'work-456'), true);
   assert.equal(isExpectedKuaishouExportCreateResponse(responseFor('other-work'), 'work-456'), false);
+
+  const firstListPage = extractKuaishouListPage({
+    data: { photoList: { photoItems: Array.from({ length: 10 }, (_, index) => ({ photoId: index })), totalCount: 15 } },
+  }, 0, 10);
+  assert.equal(firstListPage.hasMore, true);
+  assert.equal(firstListPage.total, 15);
+  assert.equal(shouldStopKuaishouPagination({
+    pageItems: 10,
+    collected: 10,
+    limit: 200,
+    hasMore: true,
+  }), false, '接口明确还有下一页时必须继续拉取');
+  assert.equal(shouldStopKuaishouPagination({
+    pageItems: 5,
+    collected: 15,
+    limit: 200,
+    hasMore: false,
+  }), true);
 } finally {
   await fs.rm(tempDir, { recursive: true, force: true });
 }

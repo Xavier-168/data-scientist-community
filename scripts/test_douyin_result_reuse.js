@@ -94,6 +94,51 @@ async function main() {
     }),
     "success"
   );
+
+  const page = mod.extractDouyinWorkListPage({
+    items: [{ id: "1" }, { id: "2" }],
+    has_more: true,
+    max_cursor: 123456,
+    total: 174,
+  });
+  assert.strictEqual(page.items.length, 2);
+  assert.strictEqual(page.hasMore, true);
+  assert.strictEqual(page.nextCursor, 123456);
+  assert.strictEqual(page.total, 174);
+
+  assert.strictEqual(
+    mod.shouldStopDouyinListScan({
+      eligibleCount: 11,
+      limit: 999,
+      staleRounds: 3,
+      staleRoundsLimit: 3,
+      apiHasMore: true,
+    }),
+    false,
+    "API 明确 has_more=true 时不能因为页面窗口不滚动就提前完成"
+  );
+  assert.strictEqual(
+    mod.shouldStopDouyinListScan({
+      eligibleCount: 11,
+      limit: 999,
+      staleRounds: 3,
+      staleRoundsLimit: 3,
+      apiHasMore: false,
+    }),
+    true
+  );
+  assert.strictEqual(
+    mod.shouldStopDouyinListScan({
+      eligibleCount: 18,
+      limit: 999,
+      staleRounds: 0,
+      staleRoundsLimit: 3,
+      apiHasMore: true,
+      apiReachedDateBoundary: true,
+    }),
+    true,
+    "跨过用户起始日期后应停止继续翻取更老作品"
+  );
 }
 
 main().catch((error) => {

@@ -200,6 +200,18 @@ export function validateTargetCoverage(targetWorks, normalizedRows) {
   return { ok: missing.length === 0, missing };
 }
 
+export function shouldStopBilibiliTargetScroll({
+  found = 0,
+  target = 0,
+  scrollChanged = true,
+  atBottom = false,
+  reachedDateBoundary = false,
+  stableRounds = 0,
+} = {}) {
+  if (target > 0 && found >= target) return true;
+  return (!scrollChanged || atBottom) && reachedDateBoundary && stableRounds >= 2;
+}
+
 export function buildOfficialBatchError(batchIndex, error) {
   const message = error instanceof Error ? error.message : String(error);
   return new Error(`official_batch_failed:${batchIndex + 1}:${message}`);
@@ -1242,7 +1254,10 @@ async function collectWorksByTargetSet(frame, targetWorks) {
       currentIndex: worksByTargetId.size,
     });
 
-    if (worksByTargetId.size >= targetWorks.length) break;
+    if (shouldStopBilibiliTargetScroll({
+      found: worksByTargetId.size,
+      target: targetWorks.length,
+    })) break;
     if (newFound === 0) stableRounds += 1;
     else stableRounds = 0;
 
@@ -1251,7 +1266,14 @@ async function collectWorksByTargetSet(frame, targetWorks) {
     const reachedBoundary = oldestVisibleTs && oldestTargetTs
       ? startOfLocalDay(oldestVisibleTs) <= startOfLocalDay(oldestTargetTs)
       : false;
-    if ((!scrollState.changed || scrollState.atBottom) && reachedBoundary && stableRounds >= 2) break;
+    if (shouldStopBilibiliTargetScroll({
+      found: worksByTargetId.size,
+      target: targetWorks.length,
+      scrollChanged: scrollState.changed,
+      atBottom: scrollState.atBottom,
+      reachedDateBoundary: reachedBoundary,
+      stableRounds,
+    })) break;
   }
 
   const missingWorks = targetWorks.filter((work) => !worksByTargetId.has(work.targetId));
@@ -1264,6 +1286,50 @@ async function collectWorksByTargetSet(frame, targetWorks) {
   }
 
   return targetWorks.map((work) => worksByTargetId.get(work.targetId) || work);
+}
+
+async function confirmTargetsWithOfficialScroll(page, targetWorks) {
+  const confirmFrame = await findDataFrame(page, { requireRecent: true });
+  await openWorkSelection(confirmFrame);
+  const confirmed = await collectWorksByTargetSet(confirmFrame, targetWorks);
+  await updateProgress({
+    phase: 'selecting',
+    message: `B 站已完成接口目标与官方弹窗滚动双重确认：${confirmed.length} 条`,
+    totalWorks: confirmed.length,
+    processedWorks: confirmed.length,
+    successWorks: confirmed.length,
+    queuedWorks: 0,
+    currentIndex: confirmed.length,
+  });
+  return { confirmed, confirmFrame };
+}
+
+async function closeWorkSelection(frame) {
+  await frame.page().keyboard.press('Escape').catch(() => {});
+  await sleep(300);
+  const closed = await frame.evaluate(() => {
+    const visible = (el) => {
+      const rect = el.getBoundingClientRect();
+      const style = window.getComputedStyle(el);
+      return rect.width > 10 && rect.height > 10 && style.visibility !== 'hidden' && style.display !== 'none';
+    };
+    const dialog = Array.from(document.querySelectorAll('[role="dialog"], .bili-modal, .bcc-dialog, .modal, body'))
+      .filter(visible)
+      .find((el) => (el.innerText || '').includes('稿件列表')) || document.body;
+    if (!(document.body.innerText || '').includes('稿件列表')) return true;
+    const cancel = Array.from(dialog.querySelectorAll('button, [role="button"], span, div, i, svg'))
+      .filter(visible)
+      .find((el) => {
+        const text = (el.textContent || '').replace(/\s+/g, '').trim();
+        const hints = [el.className, el.getAttribute?.('aria-label'), el.getAttribute?.('title')].join(' ').toLowerCase();
+        return text === '取消' || text === '关闭' || /\b(close|modal-close|dialog-close)\b/.test(hints);
+      });
+    if (!cancel) return false;
+    (cancel.closest('button, [role="button"], [tabindex]') || cancel).click();
+    return true;
+  });
+  if (!closed) throw new Error('B 站稿件滚动确认完成后未能关闭选择弹窗');
+  await sleep(500);
 }
 
 async function clearSelectedWorks(frame) {
@@ -1823,18 +1889,21 @@ async function main() {
     }
 
     const apiTargets = await listTargetWorksByApi(page);
+    // Fast XHR collection must still be checked against the real official scroll list. Otherwise a
+    // complete API response could hide a broken/changed UI scroll path until the slower CSV fallback.
+    const { confirmed: confirmedTargets, confirmFrame } = await confirmTargetsWithOfficialScroll(page, apiTargets);
 
     // ── 提速模式：优先 XHR 直采（~25 倍提速）────────────────────────────
     // 探测验证：archive_diagnose/compare 接口能直接返回完播率/跳出率/封标点击率
     // 等深度指标的 JSON。成功则跳过整条慢链路（勾自选指标+点导出+等下载+解析CSV）。
     // 失败则自动 fallback 到原 CSV 导出链路，保证稳定性。
     let rowsCount = 0;
-    const xhrResult = await tryXhrCollection(page, apiTargets);
+    const xhrResult = await tryXhrCollection(page, confirmedTargets);
     const xhrCoveredAll = (() => {
       // 检查 XHR 是否覆盖了 WBI 锁定的全部目标稿件
       // archive_diagnose 接口硬上限 50 条，超出部分 XHR 拿不到，需降级 CSV 补全
       if (!xhrResult.ok || !xhrResult.collectedBvids) return false;
-      const targetBvids = new Set(apiTargets.map((w) => w.bvid).filter(Boolean));
+      const targetBvids = new Set(confirmedTargets.map((w) => w.bvid).filter(Boolean));
       if (targetBvids.size === 0) return true; // WBI 没锁定目标，XHR 采到什么算什么
       const missed = Array.from(targetBvids).filter((bvid) => !xhrResult.collectedBvids.has(bvid));
       if (missed.length > 0) {
@@ -1853,12 +1922,13 @@ async function main() {
         : `XHR 直采未覆盖全部目标稿件（超出接口 50 条上限），降级 CSV 补全`;
       console.warn(`[bili-warning] ${reason}`);
       await updateProgress({ phase: 'csv_fallback', message: reason });
+      await closeWorkSelection(confirmFrame);
 
       let dataFrame = await findDataFrame(page, { requireRecent: true });
       await selectDataMode(dataFrame);
       await ensureComparisonMetrics(dataFrame);
       await openWorkSelection(dataFrame);
-      const works = await collectWorksByTargetSet(dataFrame, apiTargets);
+      const works = await collectWorksByTargetSet(dataFrame, confirmedTargets);
       const batches = chunkArray(works, MAX_WORKS_PER_OFFICIAL_EXPORT);
       const officialPaths = [];
       let selectedCount = 0;
