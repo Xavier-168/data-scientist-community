@@ -151,7 +151,7 @@
     "scripts/test_runner_state_rules.py": "f43f8d2bfaea5b4fc1beca9139cd119b682eda0d7d6cf3be7af6b81ddb119d08",
     "scripts/test_rust_tool_signal.mjs": "21ffcfdd428555a3e5668e33fb29bc1ad6296a59855cefe1b0ff9d4721e00b2b",
     "scripts/test_start_monitor_security.py": "8d97457351642f061d17d29cc41635361fee2032fb8fc129d9675c97c103cd25",
-    "scripts/test_subprocess_supervisor.py": "01c17f4d8f42ae76943e37c1abb9449fb376e33f612ebeaa66628b295366a6a9",
+    "scripts/test_subprocess_supervisor.py": "c5b360f141e3d182fdf4281b1514005a2e2cead2bdca33d35a9036925b76a35f",
     "scripts/test_tauri_scaffold.py": "c28f15894896c2887017c795c0368e891c997e272d022edf91754e5b5a4bc402",
     "scripts/test_tauri_startup_ui.mjs": "2f01bbe4e41c076687b633f1fffe91c45dff4e61d9ca918ea35bfa7b94170b6a",
     "scripts/test_update_manager_security.py": "730ab46641b0830291ec5569e3795b0690f166dae4a60f321c69eaf03b9bf2e9",
@@ -165,7 +165,7 @@
   },
   "source_snapshot": {
     "base_commit": "be26103a6d91492a6730833fbd61261dd249a34d",
-    "content_sha256": "26701cd4e0c2ef9bd67dd0fb8cb289fe454c8d59240f78cd6579e6693aa7b7d4",
+    "content_sha256": "a26581f132fdfa83b49fb7b93ddf81c091e76f977d9d33c83aff06e9ef4e164a",
     "inputs_dirty_against_base_commit": true,
     "kind": "working_tree"
   },

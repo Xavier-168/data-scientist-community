@@ -21,9 +21,9 @@ class SubprocessSupervisorTests(unittest.TestCase):
     def test_active_process_can_run_longer_than_inactivity_timeout(self):
         code = (
             "import time\n"
-            "for index in range(8):\n"
+            "for index in range(24):\n"
             " print(index, flush=True)\n"
-            " time.sleep(0.05)\n"
+            " time.sleep(0.1)\n"
         )
 
         result = run_supervised(
@@ -31,13 +31,13 @@ class SubprocessSupervisorTests(unittest.TestCase):
             env=os.environ.copy(),
             cwd=self.root,
             log_path=self.log_path,
-            inactivity_timeout=0.12,
+            inactivity_timeout=1,
         )
 
         self.assertEqual(result.outcome, "success")
         self.assertEqual(result.returncode, 0)
-        self.assertGreater(result.duration_seconds, 0.3)
-        self.assertIn("7", result.stdout_tail)
+        self.assertGreater(result.duration_seconds, 2)
+        self.assertIn("23", result.stdout_tail)
 
     def test_silent_process_is_killed_after_inactivity(self):
         started = time.monotonic()
@@ -47,7 +47,7 @@ class SubprocessSupervisorTests(unittest.TestCase):
             env=os.environ.copy(),
             cwd=self.root,
             log_path=self.log_path,
-            inactivity_timeout=0.1,
+            inactivity_timeout=0.3,
         )
 
         self.assertEqual(result.outcome, "stalled")
@@ -58,9 +58,9 @@ class SubprocessSupervisorTests(unittest.TestCase):
         code = (
             "import pathlib,time\n"
             f"path = pathlib.Path({str(self.progress_path)!r})\n"
-            "for index in range(7):\n"
+            "for index in range(18):\n"
             " path.write_text(str(index), encoding='utf-8')\n"
-            " time.sleep(0.05)\n"
+            " time.sleep(0.1)\n"
         )
 
         result = run_supervised(
@@ -69,7 +69,7 @@ class SubprocessSupervisorTests(unittest.TestCase):
             cwd=self.root,
             log_path=self.log_path,
             progress_path=self.progress_path,
-            inactivity_timeout=0.12,
+            inactivity_timeout=1,
         )
 
         self.assertEqual(result.outcome, "success")
