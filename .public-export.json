@@ -165,7 +165,7 @@
   },
   "source_snapshot": {
     "base_commit": "be26103a6d91492a6730833fbd61261dd249a34d",
-    "content_sha256": "d3c04dff4aaf0c530a74eb8a11489e2c0981a10d942c0a6461f45f6d07251883",
+    "content_sha256": "7623d06ba85923f3da2547aba91ff0a2856c4df92424049b0ccd3e5c9fa3ba07",
     "inputs_dirty_against_base_commit": true,
     "kind": "working_tree"
   },
@@ -190,7 +190,7 @@
     "NOTICE": "09a13b235660f094f2eec55d65d74ff5dc129c67418ea4b485c2d3929eeeed7d",
     "PLATFORM_COMPLIANCE.md": "cc7d020b47f9501ee90b1ad2561a1a4b24e5e7881f7e0aa37077e914bc43c138",
     "PRIVACY.md": "baeed611745e0dbeeb39fcdddc5af059d6147285f97b80721f2886db8534301c",
-    "README.md": "5cac11cd4c98416c33c05f76a5977b4febbe5139f81eb525248570033f84d77a",
+    "README.md": "dca6c43b853e5daae73d02f980b20d89be552f3876aed6e36b0e48f01a207913",
     "README_EN.md": "9663817045c316c15ea40ca5f86353d707f7eeb798d9c41c54015dfaff420e89",
     "RELEASE_GATE.md": "b4dc129a107c8eb44bed3b216135c49e4ba3e4a90a30397ed302bb23438602ee",
     "ROADMAP.md": "578d39c6f8c53515f1b66c20a22e636fcca2f96b4cbef524805407c22296ee76",
