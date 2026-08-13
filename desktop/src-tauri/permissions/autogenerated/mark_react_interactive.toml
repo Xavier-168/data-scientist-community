@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-mark-react-interactive"
+description = "Enables the mark_react_interactive command without any pre-configured scope."
+commands.allow = ["mark_react_interactive"]
+
+[[permission]]
+identifier = "deny-mark-react-interactive"
+description = "Denies the mark_react_interactive command without any pre-configured scope."
+commands.deny = ["mark_react_interactive"]

@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 私密安全漏洞报告
+    url: https://github.com/Xavier-168/data-scientist-community/security/advisories/new
+    about: 请通过 Private Vulnerability Reporting 提交敏感漏洞，不要在公开 Issue 粘贴密钥、Cookie 或真实数据。

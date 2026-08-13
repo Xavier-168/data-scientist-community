@@ -1,0 +1,3258 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>数据科学家 Community · Console</title>
+  <link rel="stylesheet" href="/assets/progress-apple-theme.css">
+</head>
+<body>
+
+<div id="app">
+  <!-- 侧边栏 Sidebar -->
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-icon">D</div>
+      <h1>数据工作台</h1>
+    </div>
+    
+    <nav class="nav-menu">
+      <button class="nav-item active" data-view="dashboard">
+        <i>◱</i> <span>主仪表盘</span>
+      </button>
+      <button class="nav-item" data-view="history">
+        <i>◷</i> <span>同步记录</span>
+      </button>
+      <button class="nav-item" id="btn-settings">
+        <i>⚙</i> <span>系统设置</span>
+      </button>
+    </nav>
+
+    <div style="flex-grow: 1;"></div>
+
+    <div id="update-widget" class="mailbox-card">
+      <button class="mailbox-card-main" id="btn-mailbox-open-sidebar" type="button">
+        <span class="mailbox-logo" aria-hidden="true">
+          <svg class="mailbox-icon" viewBox="0 0 72 72" focusable="false">
+            <path d="M10 52V36c0-11.6 9.4-21 21-21h24c5.5 0 10 4.5 10 10v27H10Z"/>
+            <path d="M31 15c7.5 5.2 11.5 12.6 11.5 21v16"/>
+            <path d="M21.5 35.5H31"/>
+            <path d="M50 10v24"/>
+            <path d="M50 10h16v12H50"/>
+            <circle cx="50" cy="38" r="5.5"/>
+            <path d="M34 52v10h12V52"/>
+          </svg>
+        </span>
+        <span class="mailbox-card-copy">
+          <strong>产品信箱</strong>
+        </span>
+        <span class="mailbox-badge" id="txt-update-badge"></span>
+      </button>
+    </div>
+
+    <div class="sidebar-status">
+      <div class="status-indicator">
+        <div class="dot" id="ind-license"></div>
+        <span id="txt-license">许可证</span>
+      </div>
+      <div class="status-indicator">
+        <div class="dot" id="ind-backend"></div>
+        <span id="txt-backend">后端连接</span>
+      </div>
+      <div class="status-indicator">
+        <div class="dot" id="ind-feishu"></div>
+        <span id="txt-feishu">飞书同步就绪</span>
+      </div>
+    </div>
+  </aside>
+
+  <div
+    class="sidebar-resizer"
+    id="sidebar-resizer"
+    role="separator"
+    aria-orientation="vertical"
+    aria-label="拖动调整左侧导航宽度"
+    tabindex="0"
+  ></div>
+
+  <!-- 主内容区 Main Content -->
+  <main class="main-content">
+    
+    <!-- 视图 1: 仪表盘 Dashboard -->
+    <div id="view-dashboard" class="view-container active">
+      <div class="page-header">
+        <div>
+          <h2 class="page-title" id="dash-project-name">加载中...</h2>
+          <div class="page-subtitle" id="dash-baseline">--</div>
+        </div>
+        <div class="header-actions">
+          <button class="btn btn-secondary" id="btn-auth-all" title="对当前已选平台执行一键授权" style="display:none;">一键授权所选平台</button>
+          <button class="btn btn-secondary" id="btn-download-excel" title="下载汇总Excel">⤓ 导出Excel</button>
+          <button class="btn btn-secondary" id="btn-sync-feishu">仅同步飞书</button>
+          <button class="btn btn-secondary" id="btn-rerun">修改同步日期</button>
+          <button class="btn btn-primary" id="btn-run-all">▶ 开始全面同步</button>
+        </div>
+      </div>
+
+      <!-- 四宫格数据 -->
+      <div class="grid-4" id="dash-metrics">
+        <div class="metric-card">
+          <div class="metric-title">已启用平台数</div>
+          <div class="metric-value" id="m-enabled-count">-</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-title">已授权平台数</div>
+          <div class="metric-value" id="m-auth-count">-</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-title">汇总数据行数</div>
+          <div class="metric-value" id="m-total-rows">-</div>
+        </div>
+        <div class="metric-card">
+          <div class="metric-title">历史运行次数</div>
+          <div class="metric-value" id="m-history-count">-</div>
+        </div>
+      </div>
+
+      <!-- 动态进行中任务面板 -->
+      <div class="task-pane" id="dash-task-pane">
+        <div class="task-pane-header">
+          <div class="task-copy">
+            <div class="task-kicker">
+              <span class="task-live-dot" aria-hidden="true"></span>
+              <span id="task-progress-kicker">LIVE COLLECTION</span>
+            </div>
+            <div class="task-info">
+              <div class="task-step" id="task-step-title">正在采集平台数据</div>
+              <div class="task-desc" id="task-step-desc" aria-live="polite">正在准备采集环境</div>
+            </div>
+          </div>
+          <div class="task-progress-score" aria-hidden="true">
+            <span class="task-progress-label">PROGRESS</span>
+            <span class="task-progress-number"><strong id="task-progress-percent">0</strong><span>%</span></span>
+          </div>
+        </div>
+
+        <div
+          class="task-journey"
+          id="task-journey"
+          role="progressbar"
+          aria-label="数据采集总体进度"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          aria-valuenow="0"
+        >
+          <div class="task-route">
+            <div class="task-route-track" aria-hidden="true">
+              <div class="task-route-fill" id="task-route-fill"></div>
+              <span class="task-route-start"></span>
+              <span class="task-route-finish"></span>
+              <div class="task-walker is-walking" id="task-walker">
+                <img class="task-walker-icon" src="/assets/vendor/tabler/walk.svg" alt="">
+              </div>
+            </div>
+            <div class="task-route-labels" aria-hidden="true">
+              <span>开始</span>
+              <span>完成</span>
+            </div>
+          </div>
+
+          <div class="task-journey-meta">
+            <span id="task-progress-meta">已完成 0 / 0 个平台</span>
+            <span id="task-progress-stage">正在启动采集引擎</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- 平台网格 -->
+      <h3 style="font-size: 16px; margin-top: 16px; font-weight: 600;">监控面板</h3>
+      <div class="grid-3" id="platform-grid-container">
+        <!-- JS将在此渲染平台卡片 -->
+      </div>
+    </div>
+
+    <!-- 视图 2: 历史记录 History -->
+    <div id="view-history" class="view-container">
+      <div class="page-header">
+        <div>
+          <h2 class="page-title">系统日志与运行记录</h2>
+          <div class="page-subtitle">最近的同步情况概览</div>
+        </div>
+      </div>
+      
+      <div id="history-list-container">
+        <!-- JS将在此渲染历史记录列表 -->
+      </div>
+    </div>
+    
+  </main>
+</div>
+
+<!-- ================= 弹窗与浮层 ================= -->
+
+<div id="mailbox-panel" class="mailbox-panel hidden" aria-hidden="true">
+  <div class="mailbox-panel-backdrop" id="mailbox-panel-backdrop"></div>
+  <section class="mailbox-drawer" aria-label="产品信箱">
+    <div class="mailbox-drawer-header">
+      <div class="mailbox-title-wrap">
+        <svg class="mailbox-plane-icon" viewBox="0 0 28 24" focusable="false" aria-hidden="true">
+          <path d="M2.5 11.5 25 2.5l-7 19-5.5-8-7.5 5 3-6.5-5.5-.5Z"/>
+          <path d="M8 12 25 2.5"/>
+        </svg>
+        <h3>产品信箱</h3>
+      </div>
+      <button class="mailbox-close-btn" id="btn-mailbox-close" type="button" aria-label="关闭产品信箱">
+        <svg viewBox="0 0 24 24" focusable="false" aria-hidden="true">
+          <path d="M6 6l12 12M18 6 6 18"/>
+        </svg>
+      </button>
+    </div>
+
+    <div class="mailbox-drawer-body">
+      <div class="mailbox-section mailbox-update-section">
+        <div class="mailbox-update-row">
+          <div class="mailbox-version-label" id="txt-mailbox-update-version">当前版本 V1.0.6</div>
+          <div class="mailbox-update-controls">
+            <div class="mailbox-version-state" id="txt-mailbox-update-badge">待检查</div>
+            <button class="mailbox-ghost-btn" id="btn-update-check-drawer" type="button">检查更新</button>
+          </div>
+        </div>
+        <p id="txt-mailbox-update-notes" class="mailbox-release-notes"></p>
+        <div id="update-download-progress" class="mailbox-download-progress">
+          <div class="mailbox-download-progress-meta">
+            <span id="txt-update-download-status">准备下载</span>
+            <span id="txt-update-download-percent">0%</span>
+          </div>
+          <div class="mailbox-download-progress-track">
+            <div id="bar-update-download-progress" class="mailbox-download-progress-fill"></div>
+          </div>
+        </div>
+        <div class="mailbox-drawer-actions">
+          <button class="btn btn-primary" id="btn-update-download-drawer" type="button">下载新版</button>
+          <button class="btn btn-secondary" id="btn-update-reveal-drawer" type="button">安装并重启</button>
+        </div>
+      </div>
+
+      <div class="mailbox-section">
+        <label class="mailbox-feedback-field">
+          <span>想说的话</span>
+          <textarea id="feedback-message" class="mailbox-textarea" placeholder="哪里不好用、希望加什么... 都在这里说吧。最好留一个联系方式哦。"></textarea>
+        </label>
+      </div>
+    </div>
+    <div class="mailbox-footer">
+      <button class="mailbox-send-btn" id="btn-feedback-mailto" type="button">发送反馈</button>
+      <p>你的反馈将直接发送给产品团队。</p>
+    </div>
+  </section>
+</div>
+
+<!-- 0. 许可证激活弹窗 License Activation -->
+<div id="license-overlay" class="wizard-overlay hidden">
+  <div class="wizard-card" style="max-width: 460px;">
+    <div class="wizard-header">
+      <h2 id="license-overlay-title">激活许可证</h2>
+    </div>
+    <div class="wizard-body" style="padding: 24px;">
+      <p id="license-overlay-copy" style="color: var(--text-secondary); margin-bottom: 16px; font-size: 14px;">
+        请输入您购买的许可证密钥以激活产品。
+      </p>
+      <div style="margin-bottom: 16px;">
+        <label style="display:block; font-weight:600; margin-bottom:6px; font-size:13px;">许可证密钥</label>
+        <input type="text" id="license-key-input" placeholder="YRG-XXXX-XXXX-XXXX"
+          style="width:100%; padding:10px 12px; border:1px solid var(--border); border-radius:8px;
+          font-size:15px; font-family:'Geist Mono',monospace; letter-spacing:1px;
+          background:var(--bg-secondary); color:var(--text-primary); outline:none; box-sizing:border-box;"
+        />
+      </div>
+      <div id="license-error" style="color:var(--danger); font-size:13px; margin-bottom:12px; display:none;"></div>
+      <div id="license-success" style="color:var(--success); font-size:13px; margin-bottom:12px; display:none;"></div>
+    </div>
+    <div class="wizard-footer">
+      <span style="font-size:12px; color:var(--text-tertiary);">购买咨询请联系客服</span>
+      <button class="btn btn-primary" id="btn-activate-license">激活</button>
+    </div>
+  </div>
+</div>
+
+<!-- 0.5 启动会话失效提示 -->
+<div id="session-overlay" class="wizard-overlay hidden">
+  <div class="wizard-card" style="max-width: 520px;">
+    <div class="wizard-header">
+      <h2>页面会话已失效</h2>
+    </div>
+    <div class="wizard-body" style="padding: 24px;">
+      <p id="session-message" style="color: var(--text-secondary); margin-bottom: 12px; font-size: 14px;"></p>
+      <p id="session-detail" style="color: var(--text-muted); font-size: 13px; line-height: 1.7; margin-bottom: 0;"></p>
+    </div>
+    <div class="wizard-footer">
+      <span style="font-size:12px; color:var(--text-tertiary);">请从启动器重新进入工作台</span>
+      <button class="btn btn-primary" id="btn-session-reload">重新打开当前页面</button>
+    </div>
+  </div>
+</div>
+
+<!-- 1. 初始化向导 Wizard Overlay -->
+<div id="wizard-overlay" class="wizard-overlay hidden">
+  <div class="wizard-card">
+    <div class="wizard-header">
+      <h2>初始化数据工作台</h2>
+    </div>
+    <div class="wizard-steps" id="wizard-steps-indicator">
+      <div class="step-indicator active">1. 平台选择</div>
+      <div class="step-indicator">2. 账号授权</div>
+      <div class="step-indicator">3. 基本设置</div>
+      <div class="step-indicator">4. 飞书同步</div>
+      <div class="step-indicator">5. 首次启动</div>
+    </div>
+    
+    <div class="wizard-body" id="wizard-body">
+      <!-- 动态内容 -->
+    </div>
+    
+    <div class="wizard-footer">
+      <button class="btn btn-secondary" id="wiz-btn-prev">返回上一步</button>
+      <button class="btn btn-primary" id="wiz-btn-next">下一步</button>
+    </div>
+  </div>
+</div>
+
+<!-- 2. 设置弹窗 Settings Modal -->
+<div id="modal-settings" class="modal-backdrop hidden">
+  <div class="modal-window large">
+    <div class="modal-header">
+      <h3>系统配置 (Settings)</h3>
+      <button class="btn btn-ghost" id="modal-settings-close">✕</button>
+    </div>
+    <div class="modal-body" id="settings-form-body">
+      <!-- JS 插入基础配置和飞书配置表单 -->
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" id="btn-reset-onboarding" style="margin-right: auto; color: var(--danger);">重置初始化向导</button>
+      <button class="btn btn-secondary" id="btn-test-feishu">测试飞书连接</button>
+      <button class="btn btn-primary" id="btn-save-settings">保存配置</button>
+    </div>
+  </div>
+</div>
+
+<!-- 3. 修改同步日期弹窗 Date Modal -->
+<div id="modal-rerun" class="modal-backdrop hidden">
+  <div class="modal-window">
+    <div class="modal-header">
+      <h3>修改同步日期</h3>
+      <button class="btn btn-ghost" id="modal-rerun-close">✕</button>
+    </div>
+    <div class="modal-body">
+      <p style="font-size: 13px; color: var(--text-muted);">
+        保存后仅影响后续同步任务，当前正在运行的任务不会被打断。
+      </p>
+      <div class="form-group">
+        <label>同步起始日期</label>
+        <input type="date" class="form-control" id="rerun-start-date">
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-primary" id="btn-confirm-rerun">保存日期</button>
+    </div>
+  </div>
+</div>
+
+<!-- Toasts 容器 -->
+<div id="toast-container"></div>
+
+<!-- ================= 脚本逻辑 ================= -->
+<script>
+  /*********************************************
+   * 1. 状态管理与常量映射
+   *********************************************/
+  const PLATFORMS = ["douyin", "xiaohongshu", "bilibili", "kuaishou"];
+  const LABELS = {
+    douyin: "抖音 (Douyin)",
+    xiaohongshu: "小红书 (RED)",
+    bilibili: "哔哩哔哩 (Bilibili)",
+    kuaishou: "快手 (Kuaishou)"
+  };
+  
+  // Platform ID -> backend single-run route mapping
+  const RUN_ROUTE_MAP = {
+    douyin: "/run",
+    xiaohongshu: "/run_xhs",
+    bilibili: "/run_bili",
+    kuaishou: "/run_ks"
+  };
+
+  const SESSION_STORAGE_KEY = 'yrg_monitor_session_token';
+  const DEFAULT_BUILD_VERSION = '1.0.6';
+  const SIDEBAR_WIDTH_STORAGE_KEY = 'yrg_monitor_sidebar_width';
+  const SIDEBAR_DEFAULT_WIDTH = 260;
+  const SIDEBAR_MIN_WIDTH = 160;
+  const SIDEBAR_MAX_WIDTH = 420;
+  const MAIN_CONTENT_MIN_WIDTH = 860;
+  const SIDEBAR_RESIZE_DISABLE_BREAKPOINT = 960;
+  const PAGE_URL = new URL(window.location.href);
+  const HASH_SESSION_TOKEN = new URLSearchParams(window.location.hash.replace(/^#/, '')).get('session') || '';
+  const QUERY_SESSION_TOKEN = PAGE_URL.searchParams.get('session') || '';
+
+  function readPersistedSessionToken() {
+    try {
+      return window.localStorage.getItem(SESSION_STORAGE_KEY) || '';
+    } catch (error) {
+      return '';
+    }
+  }
+
+  function persistSessionToken(token) {
+    if (!token) return;
+    try {
+      window.localStorage.setItem(SESSION_STORAGE_KEY, token);
+    } catch (error) {
+      // Ignore localStorage failures in restricted browser profiles.
+    }
+  }
+
+  function clearPersistedSessionToken() {
+    try {
+      window.localStorage.removeItem(SESSION_STORAGE_KEY);
+    } catch (error) {
+      // Ignore localStorage failures in restricted browser profiles.
+    }
+  }
+
+  function readPersistedSidebarWidth() {
+    try {
+      const raw = window.localStorage.getItem(SIDEBAR_WIDTH_STORAGE_KEY);
+      const parsed = Number.parseInt(raw || '', 10);
+      return Number.isFinite(parsed) ? parsed : SIDEBAR_DEFAULT_WIDTH;
+    } catch (error) {
+      return SIDEBAR_DEFAULT_WIDTH;
+    }
+  }
+
+  function persistSidebarWidth(width) {
+    try {
+      window.localStorage.setItem(SIDEBAR_WIDTH_STORAGE_KEY, String(width));
+    } catch (error) {
+      // Ignore localStorage failures in restricted browser profiles.
+    }
+  }
+
+  const STORED_SESSION_TOKEN = readPersistedSessionToken();
+  const SESSION_SOURCE = HASH_SESSION_TOKEN ? 'hash' : (QUERY_SESSION_TOKEN ? 'query' : (STORED_SESSION_TOKEN ? 'storage' : ''));
+  let SESSION_TOKEN = HASH_SESSION_TOKEN || QUERY_SESSION_TOKEN || STORED_SESSION_TOKEN;
+
+  // Auto-recover session from backend when URL/localStorage have no token.
+  // This handles: browser restored old tab, file:// redirect lost hash, double-click race, etc.
+  if (!SESSION_TOKEN) {
+    (async () => {
+      try {
+        const resp = await fetch('/session/recover', { signal: AbortSignal.timeout(3000) });
+        if (!resp.ok) return;
+        const data = await resp.json();
+        if (data.ok && data.token) {
+          SESSION_TOKEN = data.token;
+          persistSessionToken(SESSION_TOKEN);
+          const next = `${window.location.pathname}#session=${encodeURIComponent(SESSION_TOKEN)}`;
+          window.location.replace(next);
+        }
+      } catch (_) { /* backend not up yet or network error — ignore */ }
+    })();
+  }
+
+  function normalizeSessionUrl() {
+    if (!SESSION_TOKEN) return;
+    persistSessionToken(SESSION_TOKEN);
+
+    const current = new URL(window.location.href);
+    const hadQueryToken = current.searchParams.has('session');
+    if (hadQueryToken) current.searchParams.delete('session');
+
+    const expectedHash = `#session=${encodeURIComponent(SESSION_TOKEN)}`;
+    if (!hadQueryToken && current.hash === expectedHash) return;
+
+    const nextSearch = current.searchParams.toString();
+    const nextUrl = `${current.pathname}${nextSearch ? `?${nextSearch}` : ''}${expectedHash}`;
+    window.history.replaceState(null, '', nextUrl);
+  }
+
+  normalizeSessionUrl();
+
+  const state = {
+    config: null,
+    configSummary: null,
+    progress: null,
+    historyRuns: [],
+    expandedHistoryRuns: new Set(),
+    allRows: 0,
+    wizardStep: 1,
+    feishuSetupPhase: "choose",  // choose | connecting | scan_qr | creating_base | init_done | done | error
+    feishuSetupChoice: null,     // null | "skip" | "create"
+    feishuCliData: {},           // verification_url, app_token, base_url, error, message
+    activeView: "dashboard",
+    backendOnline: false,
+    busyKey: null,
+    sessionRequired: false,
+    sessionMessage: '',
+    licenseBlocking: false,
+    licenseStatus: null,
+    updateInfo: null,
+    packageInfo: null,
+    updateBusy: false,
+    updateDownloadedPath: '',
+    updateDownloadProgress: null,
+    updateInstallStarted: false,
+    updateError: '',
+    updateCheckedOnce: false,
+    feedbackBusy: false,
+    mailboxOpen: false,
+    forceWizard: false,
+    sidebarWidth: readPersistedSidebarWidth(),
+  };
+  const HISTORY_POLL_INTERVAL_MS = 60000;
+  const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
+  const UPDATE_DOWNLOAD_POLL_MS = 1000;
+  let historyPollInFlight = false;
+  let backendPollInFlight = false;
+  let updateCheckInFlight = false;
+  let updateDownloadPollTimer = null;
+  let lastHistoryPollAt = 0;
+  let lastUpdateCheckAt = 0;
+  let sidebarResizeState = null;
+  let fastPollTimer = null;
+  let fastPollStopAt = 0;
+  let lastWizardRenderKey = '';
+  let lastDashboardRenderKey = '';
+  const COLLECTION_JOURNEY_ANIMATION_MS = 2800;
+  let collectionJourneyAnimationFrame = null;
+  let collectionJourneyDisplayedPercent = 0;
+  let collectionJourneyTargetPercent = 0;
+  let collectionJourneyLatestState = null;
+  let collectionJourneyRunActive = false;
+  const STALE_RUNNING_THRESHOLD_MS = 10 * 60 * 1000; // 10 minutes without update = stale
+  let staleRunningNotified = new Set();
+
+  function escapeHtml(value) {
+    return String(value ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;');
+  }
+
+  function withSessionQuery(url) {
+    if (!SESSION_TOKEN) return url;
+    const target = new URL(url, window.location.origin);
+    target.searchParams.set('session', SESSION_TOKEN);
+    return target.pathname + target.search;
+  }
+
+  function withEnabledPlatformsQuery(url) {
+    const enabled = state.config?.enabled_platforms || [];
+    if (!enabled.length) return url;
+    const target = new URL(url, window.location.origin);
+    target.searchParams.set('platforms', enabled.join(','));
+    return target.pathname + target.search;
+  }
+
+  function safeHref(value) {
+    try {
+      const target = new URL(String(value || ''), window.location.origin);
+      if (!['http:', 'https:'].includes(target.protocol)) return '#';
+      return target.href;
+    } catch (error) {
+      return '#';
+    }
+  }
+
+  function getSidebarResizeBounds() {
+    const viewportWidth = Math.max(window.innerWidth || 0, document.documentElement?.clientWidth || 0, 0);
+    const dynamicMax = Math.min(SIDEBAR_MAX_WIDTH, Math.max(SIDEBAR_MIN_WIDTH, viewportWidth - MAIN_CONTENT_MIN_WIDTH));
+    return { min: SIDEBAR_MIN_WIDTH, max: dynamicMax };
+  }
+
+  function clampSidebarWidth(width) {
+    const numeric = Number(width);
+    if (!Number.isFinite(numeric)) return SIDEBAR_DEFAULT_WIDTH;
+    const { min, max } = getSidebarResizeBounds();
+    return Math.min(max, Math.max(min, Math.round(numeric)));
+  }
+
+  function isSidebarResizeDisabled() {
+    const viewportWidth = Math.max(window.innerWidth || 0, document.documentElement?.clientWidth || 0, 0);
+    return viewportWidth <= SIDEBAR_RESIZE_DISABLE_BREAKPOINT || getSidebarResizeBounds().max <= SIDEBAR_MIN_WIDTH;
+  }
+
+  function applySidebarWidth(width, { persist = true } = {}) {
+    const app = document.getElementById('app');
+    const resizer = document.getElementById('sidebar-resizer');
+    if (!app || !resizer) return;
+    const clamped = clampSidebarWidth(width);
+    const resizeDisabled = isSidebarResizeDisabled();
+    state.sidebarWidth = clamped;
+    app.style.setProperty('--sidebar-width', `${clamped}px`);
+    app.classList.toggle('sidebar-resize-disabled', resizeDisabled);
+    resizer.setAttribute('aria-valuemin', String(SIDEBAR_MIN_WIDTH));
+    resizer.setAttribute('aria-valuemax', String(getSidebarResizeBounds().max));
+    resizer.setAttribute('aria-valuenow', String(clamped));
+    if (persist) {
+      persistSidebarWidth(clamped);
+    }
+  }
+
+  function finishSidebarResize({ persist = true } = {}) {
+    const app = document.getElementById('app');
+    const currentResizeState = sidebarResizeState;
+    sidebarResizeState = null;
+    if (app) {
+      app.classList.remove('sidebar-resizing');
+    }
+    if (currentResizeState?.pointerId != null) {
+      try {
+        document.getElementById('sidebar-resizer')?.releasePointerCapture(currentResizeState.pointerId);
+      } catch (error) {
+        // Ignore release errors when pointer is already gone.
+      }
+    }
+    if (persist) {
+      applySidebarWidth(state.sidebarWidth, { persist: true });
+    }
+  }
+
+  function initSidebarResize() {
+    const app = document.getElementById('app');
+    const resizer = document.getElementById('sidebar-resizer');
+    if (!app || !resizer) return;
+
+    applySidebarWidth(state.sidebarWidth, { persist: false });
+
+    resizer.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0 || isSidebarResizeDisabled()) return;
+      event.preventDefault();
+      sidebarResizeState = {
+        startX: event.clientX,
+        startWidth: state.sidebarWidth,
+        pointerId: event.pointerId,
+      };
+      app.classList.add('sidebar-resizing');
+      resizer.setPointerCapture(event.pointerId);
+    });
+
+    resizer.addEventListener('pointermove', (event) => {
+      if (!sidebarResizeState) return;
+      const delta = event.clientX - sidebarResizeState.startX;
+      applySidebarWidth(sidebarResizeState.startWidth + delta, { persist: false });
+    });
+
+    resizer.addEventListener('pointerup', () => finishSidebarResize({ persist: true }));
+    resizer.addEventListener('pointercancel', () => finishSidebarResize({ persist: false }));
+    resizer.addEventListener('lostpointercapture', () => finishSidebarResize({ persist: true }));
+
+    resizer.addEventListener('keydown', (event) => {
+      if (isSidebarResizeDisabled()) return;
+      if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight' && event.key !== 'Home' && event.key !== 'End') return;
+      event.preventDefault();
+      if (event.key === 'Home') {
+        applySidebarWidth(SIDEBAR_MIN_WIDTH);
+        return;
+      }
+      if (event.key === 'End') {
+        applySidebarWidth(getSidebarResizeBounds().max);
+        return;
+      }
+      const step = event.shiftKey ? 32 : 16;
+      const direction = event.key === 'ArrowRight' ? 1 : -1;
+      applySidebarWidth(state.sidebarWidth + direction * step);
+    });
+
+    window.addEventListener('resize', () => {
+      applySidebarWidth(state.sidebarWidth, { persist: false });
+    });
+  }
+  
+  /*********************************************
+   * 2. API 通信层
+   *********************************************/
+  const api = {
+    request: async (method, endpoint, data=null, requestOptions={}) => {
+      const defaultTimeoutMs = method === 'GET' ? 8000 : 300000;
+      const timeoutMs = Math.max(1, Number(requestOptions.timeoutMs || defaultTimeoutMs));
+      const controller = new AbortController();
+      const externalSignal = requestOptions.signal;
+      const relayAbort = () => controller.abort();
+      if (externalSignal?.aborted) {
+        controller.abort();
+      } else {
+        externalSignal?.addEventListener('abort', relayAbort, { once: true });
+      }
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+      try {
+        const options = { method, headers: {}, signal: controller.signal };
+        if (SESSION_TOKEN) {
+          options.headers['X-YRG-Session'] = SESSION_TOKEN;
+        }
+        if (data && method === 'POST') {
+          options.headers['Content-Type'] = 'application/json';
+          options.body = JSON.stringify(data);
+        }
+        if (method === 'POST' && !data) {
+          options.headers['Content-Type'] = 'application/json';
+        }
+        if (Object.keys(options.headers).length === 0) delete options.headers;
+        
+        const res = await fetch(endpoint, options);
+        const json = await res.json();
+        state.backendOnline = true;
+        // Return even non-ok responses so callers can inspect .ok, .message, etc.
+        return json;
+      } catch (err) {
+        state.backendOnline = false;
+        console.error(err);
+        return null;
+      } finally {
+        clearTimeout(timeoutId);
+        externalSignal?.removeEventListener('abort', relayAbort);
+      }
+    },
+    get: (url, options={}) => api.request('GET', url, null, options),
+    post: (url, data=null, options={}) => api.request('POST', url, data, options)
+  };
+
+  const LICENSE_ACTIVATION_TRANSIENT_ERRORS = new Set([
+    'not_activated',
+    'invalid_license',
+    'internal_error',
+    'http_error',
+    'network_error'
+  ]);
+
+  function showToast(msg, type="info") {
+    const container = document.getElementById('toast-container');
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+    const text = document.createElement('span');
+    text.textContent = String(msg ?? '');
+    toast.appendChild(text);
+    container.appendChild(toast);
+    
+    setTimeout(() => {
+      toast.classList.add('hiding');
+      setTimeout(() => toast.remove(), 300);
+    }, 3000);
+  }
+
+  function sleepMs(ms) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  function stopFastPoll() {
+    if (fastPollTimer) {
+      clearInterval(fastPollTimer);
+      fastPollTimer = null;
+    }
+    fastPollStopAt = 0;
+  }
+
+  async function runImmediateRefresh({ includeHistory = false } = {}) {
+    if (!licenseGate || state.licenseBlocking || state.sessionRequired) return;
+    await pollBackendData({ includeHistory });
+    if (includeHistory) {
+      await refreshHistoryData({ force: true });
+    }
+  }
+
+  function isOnboardingCompleted() {
+    if (state.configSummary?.onboarding_completed !== undefined) {
+      return Boolean(state.configSummary.onboarding_completed);
+    }
+    if (state.config?.onboarding_completed !== undefined) {
+      return Boolean(state.config.onboarding_completed);
+    }
+    if (state.configSummary?.setup_complete !== undefined) {
+      return Boolean(state.configSummary.setup_complete);
+    }
+    return false;
+  }
+
+  function isSetupFlowActive() {
+    return Boolean(state.forceWizard || !isOnboardingCompleted());
+  }
+
+  function isSettingsModalOpen() {
+    const modal = document.getElementById('modal-settings');
+    return Boolean(modal && !modal.classList.contains('hidden'));
+  }
+
+  function shouldUseLightPolling() {
+    if (isSettingsModalOpen()) return true;
+    if (isSetupFlowActive()) return true;
+    const summary = state.configSummary || {};
+    const enabledCount = Number(summary.enabled_platform_count || 0);
+    const hasRunHistory = Boolean(summary.has_run_history);
+    const onboardingCompleted = isOnboardingCompleted();
+    return Boolean(
+      onboardingCompleted &&
+      !hasRunHistory &&
+      enabledCount > 0
+    );
+  }
+
+  function buildWizardRenderKey() {
+    const enabledPlatforms = state.config?.enabled_platforms || [];
+    const authSummary = enabledPlatforms.map((platformId) => {
+      const progress = state.progress?.[platformId] || {};
+      return [
+        platformId,
+        progress.auth_status || '',
+        progress.status || '',
+        progress.message || '',
+      ].join(':');
+    }).join('|');
+    return JSON.stringify({
+      forceWizard: Boolean(state.forceWizard),
+      setupComplete: Boolean(state.configSummary?.setup_complete),
+      step: state.wizardStep,
+      enabledPlatforms,
+      authSummary,
+      progressRunning: Boolean(state.progress?.running),
+      customerName: state.config?.customer_name || '',
+      workspaceName: state.config?.workspace_name || '',
+      browserChannel: state.config?.browser_channel || '',
+      minPublishDate: state.config?.min_publish_date || '',
+      feishuSetupPhase: state.feishuSetupPhase || '',
+      feishuSetupChoice: state.feishuSetupChoice || '',
+      feishuCliData: {
+        verification_url: state.feishuCliData?.verification_url || '',
+        base_url: state.feishuCliData?.base_url || '',
+        app_token: state.feishuCliData?.app_token || '',
+        message: state.feishuCliData?.message || '',
+        error: state.feishuCliData?.error || '',
+      },
+    });
+  }
+
+  function getEnabledPlatformIds() {
+    const summaryPlatforms = state.configSummary?.enabled_platforms;
+    if (Array.isArray(summaryPlatforms)) return summaryPlatforms;
+
+    const configPlatforms = state.config?.enabled_platforms;
+    if (Array.isArray(configPlatforms)) return configPlatforms;
+
+    if (state.progress) {
+      return PLATFORMS.filter((platformId) => state.progress?.[platformId]?.enabled);
+    }
+    return [];
+  }
+
+  function clampNumber(value, min, max) {
+    const numeric = Number(value);
+    if (!Number.isFinite(numeric)) return min;
+    return Math.min(max, Math.max(min, numeric));
+  }
+
+  function calculateCollectionJourneyProgress(progress, enabledPlatforms) {
+    const enabled = Array.from(new Set((enabledPlatforms || []).filter((platform) => PLATFORMS.includes(platform))));
+    const summary = progress?.summary || {};
+    const stage = String(summary.current_stage || 'idle');
+    const activePlatform = String(summary.active_platform || '');
+    const running = Boolean(progress?.running);
+    const terminalStates = new Set(['completed', 'completed_empty', 'success', 'failed', 'skipped']);
+
+    if (!running || enabled.length === 0) {
+      return {
+        percent: 0,
+        completedCount: 0,
+        totalCount: enabled.length,
+        activePlatform,
+        stage,
+        stageLabel: '等待开始采集',
+      };
+    }
+
+    let completedCount = 0;
+    let completedUnits = 0;
+
+    enabled.forEach((platform) => {
+      const platformProgress = progress?.[platform] || {};
+      const uiStatus = String(platformProgress.ui_status || platformProgress.status || 'idle');
+      if (terminalStates.has(uiStatus)) {
+        completedCount += 1;
+        completedUnits += 1;
+        return;
+      }
+
+      if (uiStatus !== 'running' && platform !== activePlatform) return;
+
+      const totalWorks = Math.max(0, Number(platformProgress.totalWorks || 0));
+      const reportedProcessed = Math.max(0, Number(platformProgress.processedWorks || 0));
+      const countedProcessed = Math.max(
+        0,
+        Number(platformProgress.successWorks || 0) +
+          Number(platformProgress.skippedWorks || 0) +
+          Number(platformProgress.failedWorks || 0),
+      );
+      const processedWorks = Math.max(reportedProcessed, countedProcessed);
+      const withinPlatform = totalWorks > 0
+        ? clampNumber(processedWorks / totalWorks, 0, 0.96)
+        : 0;
+      completedUnits += withinPlatform;
+    });
+
+    let percent = (completedUnits / enabled.length) * 94;
+    let stageLabel = activePlatform ? `正在采集 ${LABELS[activePlatform] || activePlatform}` : '正在启动采集引擎';
+
+    if (stage === 'authorizing') {
+      percent = 0;
+      stageLabel = activePlatform ? `正在准备 ${LABELS[activePlatform] || activePlatform} 账号环境` : '正在准备账号环境';
+    } else if (stage === 'importing') {
+      const feishuRuntime = summary.feishu || {};
+      percent = 96;
+      stageLabel = feishuRuntime.status === 'running' ? '正在同步飞书' : '正在整理数据并生成 Excel';
+    }
+
+    return {
+      percent: clampNumber(percent, 0, 96),
+      completedCount,
+      totalCount: enabled.length,
+      activePlatform,
+      stage,
+      stageLabel,
+    };
+  }
+
+  function applyCollectionJourneyVisualProgress(percent, journey) {
+    const visualPercent = clampNumber(percent, 0, 100);
+    const roundedPercent = Math.round(visualPercent);
+    const journeyEl = document.getElementById('task-journey');
+    const fillEl = document.getElementById('task-route-fill');
+    const percentEl = document.getElementById('task-progress-percent');
+
+    journeyEl?.style.setProperty('--journey-progress', `${visualPercent}%`);
+    journeyEl?.setAttribute('aria-valuenow', String(roundedPercent));
+    journeyEl?.setAttribute('aria-valuetext', `${journey.stageLabel}，总体进度 ${roundedPercent}%`);
+    fillEl?.style.setProperty('width', `${visualPercent}%`);
+    if (percentEl) percentEl.textContent = String(roundedPercent);
+  }
+
+  function stopCollectionJourneyAnimation() {
+    if (collectionJourneyAnimationFrame !== null) {
+      cancelAnimationFrame(collectionJourneyAnimationFrame);
+      collectionJourneyAnimationFrame = null;
+    }
+  }
+
+  function resetCollectionJourneyVisualProgress() {
+    stopCollectionJourneyAnimation();
+    collectionJourneyDisplayedPercent = 0;
+    collectionJourneyTargetPercent = 0;
+    collectionJourneyLatestState = null;
+    collectionJourneyRunActive = false;
+  }
+
+  function animateCollectionJourneyProgress(targetPercent, journey) {
+    collectionJourneyLatestState = journey;
+    const target = Math.max(
+      collectionJourneyDisplayedPercent,
+      clampNumber(targetPercent, 0, 96),
+    );
+    const from = collectionJourneyDisplayedPercent;
+    const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+
+    if (collectionJourneyAnimationFrame !== null && target === collectionJourneyTargetPercent) {
+      return;
+    }
+    stopCollectionJourneyAnimation();
+    collectionJourneyTargetPercent = target;
+    if (reduceMotion || target <= from) {
+      collectionJourneyDisplayedPercent = target;
+      applyCollectionJourneyVisualProgress(target, journey);
+      return;
+    }
+
+    let startedAt = null;
+    const step = (timestamp) => {
+      if (startedAt === null) startedAt = timestamp;
+      const elapsed = timestamp - startedAt;
+      const ratio = clampNumber(elapsed / COLLECTION_JOURNEY_ANIMATION_MS, 0, 1);
+      collectionJourneyDisplayedPercent = from + ((target - from) * ratio);
+      applyCollectionJourneyVisualProgress(collectionJourneyDisplayedPercent, collectionJourneyLatestState || journey);
+      if (ratio < 1) {
+        collectionJourneyAnimationFrame = requestAnimationFrame(step);
+      } else {
+        collectionJourneyAnimationFrame = null;
+      }
+    };
+    collectionJourneyAnimationFrame = requestAnimationFrame(step);
+  }
+
+  function renderCollectionJourney(progress, enabledPlatforms) {
+    const journey = calculateCollectionJourneyProgress(progress, enabledPlatforms);
+    const percent = clampNumber(journey.percent, 0, 96);
+    const walkerEl = document.getElementById('task-walker');
+    const metaEl = document.getElementById('task-progress-meta');
+    const stageEl = document.getElementById('task-progress-stage');
+
+    if (!collectionJourneyRunActive) {
+      collectionJourneyRunActive = true;
+      collectionJourneyDisplayedPercent = 0;
+      applyCollectionJourneyVisualProgress(0, journey);
+    }
+    animateCollectionJourneyProgress(percent, journey);
+    walkerEl?.classList.toggle('is-walking', Boolean(progress?.running) && percent < 100);
+    if (metaEl) metaEl.textContent = `已完成 ${journey.completedCount} / ${journey.totalCount} 个平台`;
+    if (stageEl) stageEl.textContent = journey.stageLabel;
+  }
+
+  function buildDashboardRenderKey() {
+    const enabledPlatforms = getEnabledPlatformIds();
+    const feishuRuntime = state.progress?.summary?.feishu || {};
+    const platformSummary = enabledPlatforms.map((platformId) => {
+      const progress = state.progress?.[platformId] || {};
+      return [
+        platformId,
+        progress.auth_status || '',
+        progress.auth_health_status || '',
+        progress.auth_checked_at || '',
+        progress.auth_last_success_at || '',
+        progress.auth_check_reason || '',
+        progress.ui_status || '',
+        progress.message || '',
+        progress.totalWorks || 0,
+        progress.processedWorks || 0,
+        progress.successWorks || 0,
+        progress.skippedWorks || 0,
+        progress.failedWorks || 0,
+      ].join(':');
+    }).join('|');
+
+    return JSON.stringify({
+      activeView: state.activeView,
+      workspaceName: state.config?.workspace_name || '',
+      minPublishDate: state.config?.min_publish_date || '',
+      enabledCount: state.configSummary?.enabled_platform_count || 0,
+      authCount: state.configSummary?.authorized_platform_count || 0,
+      allRows: state.allRows || 0,
+      historyCount: state.historyRuns?.length || 0,
+      running: Boolean(state.progress?.running),
+      activePlatform: state.progress?.summary?.active_platform || '',
+      stage: state.progress?.summary?.current_stage || '',
+      feishuStatus: feishuRuntime.status || '',
+      feishuMessage: feishuRuntime.message || '',
+      platformSummary,
+    });
+  }
+
+  function syncFeishuChoiceCards() {
+    const skipCard = document.getElementById('feishu-choice-skip');
+    const createCard = document.getElementById('feishu-choice-create');
+    if (!skipCard || !createCard) return;
+    skipCard.classList.toggle('selected', state.feishuSetupChoice === 'skip');
+    createCard.classList.toggle('selected', state.feishuSetupChoice === 'create');
+  }
+
+  function startFastPoll({ durationMs = 30000, intervalMs = null, includeHistory = false } = {}) {
+    fastPollStopAt = Date.now() + durationMs;
+    if (fastPollTimer) return;
+    const effectiveIntervalMs = Number.isFinite(intervalMs)
+      ? intervalMs
+      : (shouldUseLightPolling() ? 1200 : 800);
+    fastPollTimer = setInterval(async () => {
+      if (Date.now() >= fastPollStopAt) {
+        stopFastPoll();
+        return;
+      }
+      await runImmediateRefresh({ includeHistory });
+    }, effectiveIntervalMs);
+  }
+
+  function sessionFailureMessage() {
+    if (SESSION_TOKEN) {
+      return '当前启动会话已失效，受保护配置无法读取。请重新从“数据科学家 Community.app”进入工作台。';
+    }
+    return '当前页面未携带有效的启动会话，不能直接打开本地工作台。请从“数据科学家 Community.app”重新进入。';
+  }
+
+  function setSessionRequired(message='') {
+    state.sessionRequired = true;
+    state.sessionMessage = message || sessionFailureMessage();
+    clearLicenseBlocking();
+    if (SESSION_SOURCE === 'storage') {
+      clearPersistedSessionToken();
+    }
+  }
+
+  function clearSessionRequired() {
+    state.sessionRequired = false;
+    state.sessionMessage = '';
+  }
+
+  function updateLiveSessionToken(token) {
+    const nextToken = String(token || '').trim();
+    if (!nextToken) return false;
+    SESSION_TOKEN = nextToken;
+    persistSessionToken(SESSION_TOKEN);
+    clearSessionRequired();
+    normalizeSessionUrl();
+    return true;
+  }
+
+  async function recoverSession() {
+    try {
+      const resp = await fetch('/session/recover', { signal: AbortSignal.timeout(3000) });
+      if (!resp.ok) return false;
+      const data = await resp.json();
+      if (!data?.ok || !data?.token) return false;
+      return updateLiveSessionToken(data.token);
+    } catch (_error) {
+      return false;
+    }
+  }
+
+  function setLicenseBlocking({ activated = false, error = '', message = '' } = {}) {
+    state.licenseBlocking = true;
+    state.licenseStatus = {
+      activated: Boolean(activated),
+      error: String(error || '').trim(),
+      message: String(message || '').trim()
+    };
+    clearSessionRequired();
+    licenseValid = false;
+    licenseGate = false;
+  }
+
+  function clearLicenseBlocking() {
+    state.licenseBlocking = false;
+    state.licenseStatus = null;
+  }
+
+  window.closeForcedWizard = () => {
+    state.forceWizard = false;
+    state.feishuSetupChoice = null;
+    state.feishuSetupPhase = 'choose';
+    state.feishuCliData = {};
+    const overlay = document.getElementById('wizard-overlay');
+    if (overlay) overlay.classList.add('hidden');
+    renderView();
+  };
+
+  window.openFeishuSetupFromSettings = () => {
+    document.getElementById('modal-settings')?.classList.add('hidden');
+    state.forceWizard = true;
+    state.wizardStep = 4;
+    state.feishuSetupChoice = null;
+    state.feishuSetupPhase = 'choose';
+    state.feishuCliData = {};
+    renderView();
+  };
+
+  function renderSessionOverlay() {
+    const overlay = document.getElementById('session-overlay');
+    const messageEl = document.getElementById('session-message');
+    const detailEl = document.getElementById('session-detail');
+    if (!overlay || !messageEl || !detailEl) return;
+
+    if (!state.sessionRequired) {
+      overlay.classList.add('hidden');
+      return;
+    }
+
+    messageEl.innerText = state.sessionMessage || sessionFailureMessage();
+    detailEl.innerText = SESSION_TOKEN
+      ? '如果这是浏览器恢复出来的旧标签页，请关闭它，再从应用启动器重新进入；新的启动页会自动注入安全会话。'
+      : '当前地址栏是裸 /monitor 页面，缺少启动器注入的安全会话，所以页面不能读取受保护配置。';
+    overlay.classList.remove('hidden');
+  }
+
+  function renderLicenseOverlay() {
+    const overlay = document.getElementById('license-overlay');
+    const errEl = document.getElementById('license-error');
+    const sucEl = document.getElementById('license-success');
+    const titleEl = document.getElementById('license-overlay-title');
+    const copyEl = document.getElementById('license-overlay-copy');
+    if (!overlay || !errEl || !sucEl) return;
+
+    if (!state.licenseBlocking) {
+      errEl.style.display = 'none';
+      sucEl.style.display = 'none';
+      overlay.classList.add('hidden');
+      return;
+    }
+
+    const status = state.licenseStatus || {};
+    const errType = status.error || '';
+    const errMsg = status.message || (errType === 'machine_mismatch'
+      ? '机器指纹不匹配，请点击下方按钮重新激活'
+      : '');
+
+    if (titleEl && copyEl) {
+      titleEl.innerText = '激活许可证';
+      copyEl.innerText = '请输入您购买的许可证密钥以激活产品。';
+    }
+
+    errEl.innerText = errMsg;
+    errEl.style.display = errMsg ? 'block' : 'none';
+    sucEl.style.display = 'none';
+    overlay.classList.remove('hidden');
+  }
+
+  /*********************************************
+   * 3. 页面渲染层 
+   *********************************************/
+  
+  // 更新侧边栏连接状态
+  function renderSidebarStatus() {
+    const indBackend = document.getElementById('ind-backend');
+    const txtBackend = document.getElementById('txt-backend');
+    if (state.backendOnline) {
+      if (state.progress && state.progress.running) {
+        indBackend.className = 'dot running';
+        txtBackend.innerText = '后端运行中...';
+      } else {
+        indBackend.className = 'dot online';
+        txtBackend.innerText = '后端长连接稳固';
+      }
+    } else {
+      indBackend.className = 'dot offline';
+      txtBackend.innerText = '后端连接断开';
+    }
+
+    const indFeishu = document.getElementById('ind-feishu');
+    const txtFeishu = document.getElementById('txt-feishu');
+    if (state.configSummary) {
+       const feishuEnabled = state.configSummary.feishu_enabled;
+       const feishuReady = state.configSummary.feishu_ready;
+       const feishuRuntime = state.progress?.summary?.feishu || {};
+       if (feishuRuntime.status === 'needs_auth') {
+         indFeishu.className = 'dot offline';
+         txtFeishu.innerText = '飞书需要重新授权';
+       } else if (!feishuEnabled) {
+         indFeishu.className = 'dot';
+         txtFeishu.innerText = '飞书同步未启用';
+       } else if (feishuReady) {
+         indFeishu.className = 'dot online';
+         txtFeishu.innerText = '飞书同步就绪';
+       } else {
+         indFeishu.className = 'dot offline';
+         txtFeishu.innerText = '飞书配置待补全';
+       }
+    }
+  }
+
+  function formatBytes(bytes) {
+    const value = Number(bytes || 0);
+    if (!Number.isFinite(value) || value <= 0) return '';
+    if (value >= 1024 * 1024 * 1024) return `${(value / 1024 / 1024 / 1024).toFixed(1)} GB`;
+    if (value >= 1024 * 1024) return `${Math.round(value / 1024 / 1024)} MB`;
+    if (value >= 1024) return `${Math.round(value / 1024)} KB`;
+    return `${value} B`;
+  }
+
+  function normalizeBuildVersion(value, fallback = DEFAULT_BUILD_VERSION) {
+    const raw = String(value || fallback || '').trim().replace(/^v/i, '');
+    return raw || fallback;
+  }
+
+  function formatDisplayVersion(value) {
+    return `V${normalizeBuildVersion(value)}`;
+  }
+
+  function isUpdateDownloadActive() {
+    const status = state.updateDownloadProgress?.status || '';
+    return ['queued', 'running', 'verifying'].includes(status);
+  }
+
+  function getCurrentBuildVersion() {
+    return normalizeBuildVersion(
+      state.updateInfo?.current?.build_version ||
+      state.packageInfo?.build_version ||
+      state.packageInfo?.version ||
+      DEFAULT_BUILD_VERSION
+    );
+  }
+
+  async function loadPackageInfo() {
+    const info = await api.get('/package-info');
+    if (!info?.ok) return;
+    state.packageInfo = info;
+    renderUpdateWidget();
+  }
+
+  function classifyUpdateCheck(payload) {
+    if (payload?.update_status === 'not_configured' || payload?.error === 'update_service_not_configured') {
+      return 'not_configured';
+    }
+    if (!payload || payload.ok === false || payload.error || payload.unavailable) return 'unavailable';
+    if (payload.update_available) return 'available';
+    return 'current';
+  }
+
+  function renderUpdateWidget() {
+    const updateClassification = classifyUpdateCheck(state.updateInfo);
+    const updateAvailable = updateClassification === 'available';
+    const updateNotConfigured = updateClassification === 'not_configured';
+    const latest = state.updateInfo?.latest || {};
+    const progress = state.updateDownloadProgress || {};
+    const progressStatus = progress.status || '';
+    const downloadActive = isUpdateDownloadActive();
+    const installing = state.updateInstallStarted || progressStatus === 'installing';
+    const downloaded = Boolean(state.updateDownloadedPath);
+    const current = formatDisplayVersion(getCurrentBuildVersion());
+    const sizeText = formatBytes(latest.size_bytes);
+    const releaseNotes = String(latest.release_notes || '').trim();
+    let badgeText = '待检查';
+    if (installing) {
+      badgeText = '正在安装';
+    } else if (downloadActive) {
+      badgeText = '下载中';
+    } else if (state.updateBusy) {
+      badgeText = '检查中';
+    } else if (state.updateCheckedOnce && updateNotConfigured) {
+      badgeText = '未配置';
+    } else if (state.updateError || (state.updateCheckedOnce && updateClassification === 'unavailable')) {
+      badgeText = '检查失败';
+    } else if (updateAvailable) {
+      badgeText = latest.mandatory ? '必须更新' : '发现新版';
+    } else if (state.updateCheckedOnce && updateClassification === 'current') {
+      badgeText = '已是最新';
+    }
+    const versionText = updateAvailable
+      ? `当前版本 ${current}，新版 ${latest.version || 'latest'}${sizeText ? ` · ${sizeText}` : ''}`
+      : `当前版本 ${current}`;
+    const detailText = updateNotConfigured
+      ? '当前版本未配置自动更新服务；源码版本请从项目发布页获取更新。'
+      : state.updateError || progress.message || releaseNotes;
+    const progressPercent = Math.max(0, Math.min(100, Number(progress.percent || 0)));
+    const progressText = progressStatus === 'verifying'
+      ? '正在校验'
+      : installing
+        ? '正在安装'
+        : progress.message || '正在下载';
+    const downloadedText = formatBytes(progress.downloaded_bytes);
+    const totalText = formatBytes(progress.total_bytes);
+
+    const widget = document.getElementById('update-widget');
+    const panel = document.getElementById('mailbox-panel');
+    const updateSection = document.querySelector('.mailbox-update-section');
+    widget?.classList.toggle('has-update', updateAvailable);
+    updateSection?.classList.toggle('has-update', updateAvailable);
+    if (panel) {
+      panel.classList.toggle('hidden', !state.mailboxOpen);
+      panel.setAttribute('aria-hidden', state.mailboxOpen ? 'false' : 'true');
+    }
+
+    [
+      ['txt-update-badge', updateAvailable ? '1' : ''],
+      ['txt-mailbox-update-badge', badgeText],
+      ['txt-mailbox-update-version', versionText],
+    ].forEach(([id, text]) => {
+      const el = document.getElementById(id);
+      if (el) el.innerText = text;
+    });
+
+    [
+      ['txt-update-notes', detailText],
+      ['txt-mailbox-update-notes', detailText],
+    ].forEach(([id, text]) => {
+      const el = document.getElementById(id);
+      if (!el) return;
+      el.style.display = text ? 'block' : 'none';
+      el.innerText = text;
+    });
+
+    const progressWrap = document.getElementById('update-download-progress');
+    if (progressWrap) {
+      const visible = downloadActive || progressStatus === 'verifying' || installing || progressStatus === 'completed';
+      progressWrap.style.display = visible ? 'block' : 'none';
+    }
+    const progressStatusEl = document.getElementById('txt-update-download-status');
+    if (progressStatusEl) {
+      const sizePair = downloadedText && totalText ? ` · ${downloadedText} / ${totalText}` : '';
+      progressStatusEl.innerText = `${progressText}${sizePair}`;
+    }
+    const progressPercentEl = document.getElementById('txt-update-download-percent');
+    if (progressPercentEl) {
+      progressPercentEl.innerText = `${Math.round(progressPercent)}%`;
+    }
+    const progressBar = document.getElementById('bar-update-download-progress');
+    if (progressBar) {
+      progressBar.style.width = `${progressPercent}%`;
+    }
+
+    const checkButtons = [document.getElementById('btn-update-check'), document.getElementById('btn-update-check-drawer')].filter(Boolean);
+    const downloadButtons = [document.getElementById('btn-update-download'), document.getElementById('btn-update-download-drawer')].filter(Boolean);
+    const revealButtons = [document.getElementById('btn-update-reveal'), document.getElementById('btn-update-reveal-drawer')].filter(Boolean);
+    checkButtons.forEach((btn) => { btn.disabled = state.updateBusy || downloadActive || installing; });
+    downloadButtons.forEach((btn) => {
+      btn.disabled = state.updateBusy || downloadActive || installing;
+      btn.style.display = updateAvailable ? '' : 'none';
+      btn.innerText = downloadActive
+        ? `下载中 ${Math.round(progressPercent)}%`
+        : installing
+          ? '正在安装'
+          : (downloaded ? '重新下载' : (btn.id.endsWith('drawer') ? '下载新版' : '下载'));
+    });
+    revealButtons.forEach((btn) => {
+      btn.disabled = downloadActive || installing || !state.updateDownloadedPath;
+      btn.style.display = state.updateDownloadedPath ? '' : 'none';
+      btn.innerText = installing ? '正在安装' : '安装并重启';
+    });
+  }
+
+  function setMailboxOpen(open) {
+    state.mailboxOpen = Boolean(open);
+    renderUpdateWidget();
+  }
+
+  function renderFeedbackButton() {
+    const btn = document.getElementById('btn-feedback-mailto');
+    if (!btn) return;
+    btn.disabled = state.feedbackBusy;
+    btn.innerText = state.feedbackBusy ? '发送中...' : '发送反馈';
+  }
+
+  async function sendFeedback() {
+    const message = document.getElementById('feedback-message')?.value?.trim() || '';
+    if (!message) {
+      showToast('请先写下反馈内容', 'error');
+      return;
+    }
+    const currentVersion = getCurrentBuildVersion();
+    const customerName = state.config?.customer_name || state.licenseStatus?.customer_name || '未填写';
+    const workspaceName = state.config?.workspace_name || '未填写';
+    state.feedbackBusy = true;
+    renderFeedbackButton();
+    try {
+      const res = await api.post('/feedback/send', {
+        message,
+        page_path: window.location.pathname,
+        user_agent: navigator.userAgent,
+        customer_name: customerName,
+        workspace_name: workspaceName,
+        current_version: currentVersion,
+      });
+      if (!res?.ok) {
+        showToast(res?.message || '反馈暂时发送失败，请稍后重试', 'error');
+        return;
+      }
+      document.getElementById('feedback-message').value = '';
+      showToast(res.message || '反馈已发送给产品团队', 'success');
+    } finally {
+      state.feedbackBusy = false;
+      renderFeedbackButton();
+    }
+  }
+
+  let lastWizardStep = 0;
+  // 渲染向导面板
+  function renderWizard() {
+    const overlay = document.getElementById('wizard-overlay');
+
+    if (state.sessionRequired || state.licenseBlocking) {
+      overlay.classList.add('hidden');
+      lastWizardRenderKey = '';
+      return;
+    }
+    
+    // 如果设置已完成且不处于强制展示状态，隐藏向导
+    if (isOnboardingCompleted() && !state.forceWizard) {
+      if(!overlay.classList.contains('hidden')) {
+          overlay.classList.add('hidden');
+      }
+      lastWizardRenderKey = '';
+      return;
+    } else {
+      overlay.classList.remove('hidden');
+    }
+
+    const wizardRenderKey = buildWizardRenderKey();
+    if (wizardRenderKey === lastWizardRenderKey) {
+      return;
+    }
+    lastWizardRenderKey = wizardRenderKey;
+
+    // 更新指标点
+    const steps = document.querySelectorAll('.step-indicator');
+    steps.forEach((el, index) => {
+      const stepNum = index + 1;
+      el.className = 'step-indicator';
+      if (stepNum < state.wizardStep) el.classList.add('done');
+      if (stepNum === state.wizardStep) el.classList.add('active');
+    });
+
+    const body = document.getElementById('wizard-body');
+    const btnPrev = document.getElementById('wiz-btn-prev');
+    const btnNext = document.getElementById('wiz-btn-next');
+    
+    btnPrev.style.visibility = state.forceWizard && state.wizardStep === 4
+      ? 'visible'
+      : (state.wizardStep > 1 ? 'visible' : 'hidden');
+    btnNext.innerText = state.forceWizard
+      ? ((state.wizardStep === 4 && ['done', 'ready'].includes(state.feishuSetupPhase)) ? '完成' : '下一步')
+      : (state.wizardStep === 5 ? '完成并首次运行' : '下一步');
+    // Hide next button during Feishu sub-flow (connecting/scan/creating)
+    if (state.wizardStep === 4 && ['connecting','scan_qr','creating_base','init_done','error'].includes(state.feishuSetupPhase)) {
+      btnNext.style.display = 'none';
+    } else {
+      btnNext.style.display = '';
+    }
+
+    // 基于步骤展示不同的表单
+    if (state.wizardStep === 1) {
+      if (lastWizardStep !== 1 || !body.querySelector('.switch-group')) {
+        let html = `<h3 style="margin-bottom:16px;">选择你需要采集数据的目标平台：</h3><div class="grid-2">`;
+        PLATFORMS.forEach(p => {
+           html += `
+            <div class="switch-group" style="cursor:pointer; transition: box-shadow 0.2s;" onmouseover="this.style.borderColor='var(--primary)'" onmouseout="this.style.borderColor='var(--border)'" onclick="document.getElementById('wiz-chk-${p}').click()">
+              <div class="switch-label">
+                <span class="switch-title">${LABELS[p]}</span>
+              </div>
+              <input type="checkbox" id="wiz-chk-${p}" onclick="event.stopPropagation()" onchange="togglePlatform('${p}', this.checked)">
+            </div>
+           `;
+        });
+        html += `</div>`;
+        body.innerHTML = html;
+      }
+      // Update states
+      if (state.config && state.config.enabled_platforms) {
+         PLATFORMS.forEach(p => {
+           const chk = document.getElementById(`wiz-chk-${p}`);
+           if (chk) chk.checked = state.config.enabled_platforms.includes(p);
+         });
+      }
+    } 
+    else if (state.wizardStep === 2) {
+      // 步骤2 只有只读状态和按钮，直接全量渲染避免颗粒化更新太复杂
+      let html = `<h3 style="margin-bottom:16px;">对选中的平台授权浏览器自动化：</h3><div class="grid-2">`;
+      const enabledPlatforms = state.config?.enabled_platforms || [];
+      if(enabledPlatforms.length === 0) {
+        body.innerHTML = `<div class="form-text">未选择任何平台。</div>`;
+      } else {
+        enabledPlatforms.forEach(p => {
+           const pData = state.progress?.[p];
+           const isAuth = pData?.auth_status === 'authorized';
+           html += `
+            <div class="platform-card" style="padding: 12px 16px;">
+              <div class="platform-name">${LABELS[p]}</div>
+              <div class="platform-actions">
+                <span class="badge ${isAuth ? 'green' : 'gray'}">${isAuth ? '已授权' : '未授权'}</span>
+                <button class="btn btn-secondary" style="padding:4px 8px; font-size:12px;" onclick="triggerAuth('${p}')">
+                  ${isAuth ? '重新授权' : '去授权'}
+                </button>
+              </div>
+            </div>
+           `;
+        });
+        if (enabledPlatforms.length > 1) {
+          html += `
+            <div style="grid-column: 1 / -1; display:flex; justify-content:flex-end; padding-top:8px;">
+              <button class="btn btn-secondary" style="padding:6px 12px; font-size:12px;" onclick="triggerAuthAll()">一键授权所选平台</button>
+            </div>
+          `;
+        }
+        html += `</div>`;
+        body.innerHTML = html;
+      }
+    }
+    else if (state.wizardStep === 3) {
+      if (lastWizardStep !== 3) {
+        body.innerHTML = `
+          <h3 style="margin-bottom:16px;">基本环境设置：</h3>
+          <div class="form-group" style="margin-bottom:12px;">
+               <label>客户名称 / 工作台名称</label>
+               <div style="display:flex;gap:12px;">
+               <input type="text" class="form-control" id="wiz-cust-name" value="${escapeHtml(state.config?.customer_name||'')}" style="flex:1;" placeholder="必填：客户名称">
+               <input type="text" class="form-control" id="wiz-ws-name" value="${escapeHtml(state.config?.workspace_name||'')}" style="flex:1;" placeholder="必填：项目名称">
+             </div>
+          </div>
+          <div class="form-group" style="margin-bottom:12px;">
+             <label>数据采集安全浏览器</label>
+             <input type="hidden" id="wiz-browser" value="chrome">
+             <div class="form-text">固定使用 Chrome 内核运行；如果本机没有安装 Google Chrome，会自动使用内置 Chrome 运行时。</div>
+          </div>
+        `;
+      }
+    }
+    else if (state.wizardStep === 4) {
+      renderFeishuStep(body);
+    }
+    else if (state.wizardStep === 5) {
+      if (lastWizardStep !== 5) {
+        body.innerHTML = `
+          <div style="text-align:center; padding: 32px 0;">
+            <h2 style="font-family:var(--font-brand); color:var(--primary); font-size:32px; margin-bottom:16px;">一切准备就绪</h2>
+            <p style="color:var(--text-muted); margin-bottom: 24px;">你已经配置了 <span id="wiz-enabled-count" style="font-weight:bold;color:var(--text-main);">0</span> 个自动采集平台。<br>点击下方完成向导，我们将立即开始首次数据聚合！</p>
+            <div class="form-group" style="text-align:left; max-width: 300px; margin: 0 auto;">
+              <label>首次需采集的起始日期</label>
+              <input type="date" class="form-control" id="wiz-start-date" value="${escapeHtml(state.config?.min_publish_date||'')}">
+            </div>
+          </div>
+        `;
+      }
+
+      let countText = document.getElementById('wiz-enabled-count');
+      if (countText && state.config?.enabled_platforms) {
+         countText.innerText = state.config.enabled_platforms.length;
+      }
+    }
+    
+    lastWizardStep = state.wizardStep;
+  }
+
+  // =========== 飞书引导步骤渲染 ===========
+  let _feishuPollTimer = null;
+
+  function renderFeishuStep(body) {
+    const phase = state.feishuSetupPhase || 'choose';
+
+    // --- 选择页面 ---
+    if (phase === 'choose' || phase === 'skip') {
+      if (body.dataset.feishuView !== 'choice') {
+        body.innerHTML = `
+          <div style="text-align:center; margin-bottom:20px;">
+            <h3 style="font-size:18px; font-weight:600; margin-bottom:6px;">数据云端同步</h3>
+            <p style="color:var(--text-muted); font-size:13px;">采集到的数据可以自动同步到飞书多维表格，方便团队协作和可视化分析。<br>你也可以稍后在设置中配置。</p>
+          </div>
+          <div class="feishu-choice-grid">
+            <div id="feishu-choice-skip" class="feishu-choice-card" onclick="selectFeishuChoice('skip')">
+              <div class="feishu-choice-icon" style="opacity:0.7;">⏭</div>
+              <div class="feishu-choice-title">暂不需要</div>
+              <div class="feishu-choice-desc">仅使用本地 Excel<br>导出数据分析</div>
+            </div>
+            <div id="feishu-choice-create" class="feishu-choice-card" onclick="selectFeishuChoice('create')">
+              <div class="feishu-choice-icon">✦</div>
+              <div class="feishu-choice-title">创建新表格</div>
+              <div class="feishu-choice-desc">清掉旧飞书授权<br>重新登录并建新表</div>
+            </div>
+          </div>
+          ${state.forceWizard ? `
+            <div style="text-align:center; margin-top:16px;">
+              <button class="btn btn-ghost" style="font-size:12px;" onclick="closeForcedWizard()">返回工作台</button>
+            </div>
+          ` : ''}
+        `;
+        body.dataset.feishuView = 'choice';
+      }
+      syncFeishuChoiceCards();
+      return;
+    }
+
+    // --- 正在连接 / 扫码 / 建表（全部用统一 spinner UI）---
+    if (['connecting', 'scan_qr', 'creating_base'].includes(phase)) {
+      const url = state.feishuCliData?.verification_url || '';
+      const safeUrl = safeHref(url);
+      const safeUrlText = escapeHtml(url);
+      const hasUrl = phase === 'scan_qr' && url;
+      const isUserAuth = state.feishuCliData?.auth_mode === 'user';
+
+      const titles = {
+        connecting: isUserAuth ? '正在准备用户授权...' : '正在连接飞书...',
+        scan_qr: isUserAuth ? '第二步：授权写入权限' : '第一步：登录飞书开放平台',
+        creating_base: '正在自动创建多维表格...',
+      };
+      const descriptions = {
+        connecting: isUserAuth ? '正在生成授权链接，请稍候...' : '正在生成登录链接，请稍候...',
+        scan_qr: isUserAuth
+          ? '应用已创建成功！现在需要再授权一次，让本工具能以你的名义写入飞书多维表格。'
+          : '请用飞书扫码或点击下方链接，完成开放平台应用创建。',
+        creating_base: '扫码成功，正在创建数据表格...',
+      };
+
+      body.innerHTML = `
+        <div style="text-align:center; padding:24px 0;">
+          ${isUserAuth ? `
+            <div style="background:rgba(59,130,246,0.08); border:1px solid rgba(59,130,246,0.2); border-radius:10px; padding:12px 16px; margin-bottom:16px; max-width:460px; margin-left:auto; margin-right:auto; text-align:left;">
+              <div style="font-size:13px; font-weight:600; color:var(--primary); margin-bottom:4px;">第一步已完成，还差最后一步</div>
+              <div style="font-size:12px; color:var(--text-muted); line-height:1.5;">你的飞书应用已创建成功。现在需要授权写入权限，数据才能同步到你的飞书表格中。</div>
+            </div>
+          ` : ''}
+          <h3 style="font-size:16px; margin-bottom:8px;">${titles[phase]}</h3>
+          ${!isUserAuth ? `
+            <div style="display:inline-flex; gap:6px; margin-bottom:12px;">
+              <span style="width:24px; height:4px; border-radius:2px; background:var(--primary);"></span>
+              <span style="width:24px; height:4px; border-radius:2px; background:var(--border);"></span>
+            </div>
+          ` : `
+            <div style="display:inline-flex; gap:6px; margin-bottom:12px;">
+              <span style="width:24px; height:4px; border-radius:2px; background:var(--success);"></span>
+              <span style="width:24px; height:4px; border-radius:2px; background:var(--primary);"></span>
+            </div>
+          `}
+          <p style="color:var(--text-muted); font-size:13px; margin-bottom:20px;">${descriptions[phase]}</p>
+          ${hasUrl ? `
+            <div style="background:var(--bg-secondary); border:1px solid ${isUserAuth ? 'rgba(59,130,246,0.3)' : 'var(--border)'}; border-radius:10px; padding:16px; max-width:460px; margin:0 auto 16px;">
+              <a href="${safeUrl}" target="_blank" class="btn ${isUserAuth ? 'btn-primary' : 'btn-primary'}" style="display:inline-block; text-decoration:none; margin-bottom:8px;">${isUserAuth ? '打开飞书授权页面' : '打开飞书登录页面'}</a>
+              ${isUserAuth ? `
+                <div style="font-size:11px; color:var(--text-muted); margin-top:4px;">授权后此页面会自动继续，无需手动操作。</div>
+              ` : `
+                <div style="font-size:11px; color:var(--text-muted); word-break:break-all; margin-top:6px;">${safeUrlText}</div>
+              `}
+            </div>
+          ` : ''}
+          <div class="wizard-spinner" aria-hidden="true"></div>
+          <p style="font-size:12px; color:var(--text-muted);">${hasUrl ? (isUserAuth ? '等待授权完成...' : '等待扫码完成...') : '请稍候...'}</p>
+          <div style="margin-top:12px;"><button class="btn btn-ghost" style="font-size:12px;" onclick="cancelFeishuSetup()">取消</button></div>
+        </div>
+      `;
+      body.dataset.feishuView = phase;
+      return;
+    }
+
+    // --- 登录完成，等待用户粘贴链接（existing 模式）---
+    if (phase === 'init_done' && state.feishuSetupChoice === 'existing') {
+      body.innerHTML = `
+        <div style="text-align:center; padding:24px 0;">
+          <h3 style="font-size:16px; margin-bottom:8px;">飞书登录成功</h3>
+          <p style="color:var(--text-muted); font-size:13px; margin-bottom:20px;">请粘贴你的飞书多维表格链接：</p>
+          <div style="max-width:440px; margin:0 auto;">
+            <input type="text" class="form-control" id="wiz-bitable-url" placeholder="https://xxx.feishu.cn/base/..." style="text-align:center; font-size:14px;">
+            <button class="btn btn-primary" style="margin-top:12px;" onclick="parseFeishuUrl()">确认</button>
+            <div id="wiz-bitable-url-error" style="color:var(--danger); font-size:12px; margin-top:8px; display:none;"></div>
+          </div>
+          <div style="margin-top:16px;"><button class="btn btn-ghost" style="font-size:12px;" onclick="cancelFeishuSetup()">重新选择</button></div>
+        </div>
+      `;
+      body.dataset.feishuView = phase;
+      return;
+    }
+
+    // --- 全部完成 ---
+    if (phase === 'done' || phase === 'ready') {
+      const baseUrl = state.feishuCliData?.base_url || '';
+      const safeBaseUrl = safeHref(baseUrl);
+      body.innerHTML = `
+        <div style="text-align:center; padding:32px 0;">
+          <div style="width:56px; height:56px; border-radius:50%; background:rgba(34,197,94,0.12); display:flex; align-items:center; justify-content:center; margin:0 auto 16px;">
+            <span style="font-size:28px;">✓</span>
+          </div>
+          <h3 style="font-size:18px; font-weight:600; margin-bottom:8px; color:var(--success);">飞书同步配置完成</h3>
+          <p style="color:var(--text-muted); font-size:13px;">数据采集后将自动同步到飞书多维表格。</p>
+          ${baseUrl ? `<a href="${safeBaseUrl}" target="_blank" style="font-size:12px; color:var(--primary); margin-top:8px; display:inline-block;">查看表格</a>` : ''}
+          <p style="color:var(--text-muted); font-size:12px; margin-top:12px;">点击「下一步」继续。</p>
+        </div>
+      `;
+      body.dataset.feishuView = phase;
+      document.getElementById('wiz-btn-next').style.display = '';
+      return;
+    }
+
+    // --- 错误 ---
+    if (phase === 'error') {
+      const errMsg = escapeHtml(state.feishuCliData?.error || '未知错误');
+      body.innerHTML = `
+        <div style="text-align:center; padding:32px 0;">
+          <div style="font-size:32px; margin-bottom:12px;">⚠</div>
+          <h3 style="font-size:16px; margin-bottom:8px;">连接遇到问题</h3>
+          <p style="color:var(--danger); font-size:13px; margin-bottom:20px; max-width:440px; margin-left:auto; margin-right:auto; word-break:break-word;">${errMsg}</p>
+          <button class="btn btn-secondary" onclick="cancelFeishuSetup()">重试</button>
+          <button class="btn btn-ghost" style="margin-left:8px;" onclick="selectFeishuChoice('skip'); state.wizardStep=5; renderWizard();">跳过飞书</button>
+        </div>
+      `;
+      body.dataset.feishuView = phase;
+      document.getElementById('wiz-btn-next').style.display = 'none';
+      return;
+    }
+  }
+
+  // --- Feishu setup action handlers ---
+
+  window.selectFeishuChoice = (choice) => {
+    state.feishuSetupChoice = choice;
+    state.feishuSetupPhase = 'choose';
+    state.feishuCliData = {};
+    state._creatingBase = false;
+    if (state.wizardStep === 4) {
+      syncFeishuChoiceCards();
+      lastWizardRenderKey = buildWizardRenderKey();
+      return;
+    }
+    renderWizard();
+  };
+
+  window.cancelFeishuSetup = async () => {
+    if (_feishuPollTimer) { clearInterval(_feishuPollTimer); _feishuPollTimer = null; }
+    await api.post('/feishu/cli-reset');
+    state.feishuSetupPhase = 'choose';
+    state.feishuSetupChoice = null;
+    state.feishuCliData = {};
+    state._creatingBase = false;
+    renderWizard();
+  };
+
+  window.triggerFeishuReauth = async () => {
+    showToast('正在生成飞书授权链接...');
+    const res = await api.post('/feishu/cli-auth', { reason: 'schema_update_requires_user_auth' });
+    if (!res?.ok) {
+      showToast(res?.message || '无法启动飞书重新授权流程', 'error');
+      return;
+    }
+    showToast('飞书授权链接已生成，请扫码完成授权。', 'success');
+  };
+
+  async function startFeishuConnect() {
+    state.feishuSetupPhase = 'connecting';
+    state.feishuCliData = {};
+    renderWizard();
+
+    const mode = state.feishuSetupChoice;  // "create"
+    const baseName = state.config?.workspace_name || '自媒体数据分析';
+    const res = await api.post('/feishu/cli-init', {
+      mode,
+      name: baseName,
+      force_reauth: mode === 'create',
+    });
+    if (!res?.ok) {
+      state.feishuSetupPhase = 'error';
+      state.feishuCliData = { error: res?.error || '连接失败' };
+      renderWizard();
+      return;
+    }
+    // Poll backend — it handles config init → base create automatically
+    startFeishuPoll();
+  }
+
+  function startFeishuPoll() {
+    if (_feishuPollTimer) clearInterval(_feishuPollTimer);
+    _feishuPollTimer = setInterval(async () => {
+      const res = await api.get('/feishu/cli-status');
+      if (!res) return;
+
+      const prevPhase = state.feishuSetupPhase;
+      const prevCliData = state.feishuCliData || {};
+      state.feishuCliData = res;
+      const shouldRefreshWizard = (
+        res.phase !== prevPhase
+        || (res.verification_url || '') !== (prevCliData.verification_url || '')
+        || (res.message || '') !== (prevCliData.message || '')
+        || (res.error || '') !== (prevCliData.error || '')
+        || (res.base_url || '') !== (prevCliData.base_url || '')
+        || (res.app_token || '') !== (prevCliData.app_token || '')
+        || (res.auth_mode || '') !== (prevCliData.auth_mode || '')
+      );
+
+      if (res.phase === 'error') {
+        clearInterval(_feishuPollTimer); _feishuPollTimer = null;
+        state.feishuSetupPhase = 'error';
+        renderWizard();
+      } else if (res.phase === 'done') {
+        // All done — config init + base create completed
+        clearInterval(_feishuPollTimer); _feishuPollTimer = null;
+        state.feishuSetupPhase = 'done';
+        // Refresh config from server
+        const conf = await api.get('/config');
+        if (conf?.config) { state.config = conf.config; state.configSummary = conf.summary; }
+        renderWizard();
+      } else if (shouldRefreshWizard) {
+        state.feishuSetupPhase = res.phase;
+        renderWizard();
+      }
+    }, 2000);
+  }
+
+  window.parseFeishuUrl = async () => {
+    const urlInput = document.getElementById('wiz-bitable-url');
+    const errEl = document.getElementById('wiz-bitable-url-error');
+    const url = (urlInput?.value || '').trim();
+    if (!url) {
+      errEl.innerText = '请输入飞书多维表格链接';
+      errEl.style.display = 'block';
+      return;
+    }
+    const res = await api.post('/feishu/parse-bitable-url', { url });
+    if (res?.ok) {
+      const saveRes = await api.post('/feishu/cli-save', { app_token: res.app_token });
+      if (saveRes?.ok) {
+        if (saveRes.config) state.config = saveRes.config;
+        if (saveRes.summary) state.configSummary = { ...state.configSummary, ...saveRes.summary };
+      }
+      state.feishuSetupPhase = 'ready';
+      renderWizard();
+    } else {
+      errEl.innerText = res?.message || '无法解析链接';
+      errEl.style.display = 'block';
+    }
+  };
+
+  function renderHistoryCount() {
+    const el = document.getElementById('m-history-count');
+    if (el) el.innerText = state.historyRuns?.length || 0;
+  }
+
+  function formatAuthHealthTime(value) {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    const normalized = raw.replace(/([+-]\d{2})(\d{2})$/, '$1:$2');
+    const parsed = new Date(normalized);
+    if (Number.isNaN(parsed.getTime())) return '';
+    return parsed.toLocaleTimeString('zh-CN', { hour: '2-digit', minute: '2-digit', hour12: false });
+  }
+
+  function authHealthDisplay(progress) {
+    const healthStatus = String(progress?.auth_health_status || 'unknown');
+    const authStatus = String(progress?.auth_status || 'unauthorized');
+    const checkedAt = formatAuthHealthTime(progress?.auth_checked_at);
+    const suffix = checkedAt ? ` · 最近检查 ${checkedAt}` : '';
+    if (authStatus === 'unauthorized') return '尚未授权';
+    if (authStatus === 'needs_auth') return `需要授权${suffix}`;
+    if (authStatus === 'expired') return `授权已过期${suffix}`;
+    if (healthStatus === 'healthy') return `登录态正常${suffix}`;
+    if (healthStatus === 'expired' || healthStatus === 'needs_auth') return `授权已过期${suffix}`;
+    if (healthStatus === 'skipped') return `设备正忙，登录态将在稍后复查${suffix}`;
+    if (progress?.auth_check_reason === 'new_authorization') return '授权已更新，等待后台首次检查';
+    if (progress?.auth_status === 'authorized') return `登录态检查异常，保留上次有效状态${suffix}`;
+    return checkedAt ? `最近检查 ${checkedAt}` : '等待首次后台检查';
+  }
+
+  // 渲染仪表盘数据
+  function renderDashboard() {
+    if (!state.progress || !state.configSummary) return;
+    if (isSettingsModalOpen()) return;
+
+    const dashboardRenderKey = buildDashboardRenderKey();
+    if (dashboardRenderKey === lastDashboardRenderKey) return;
+    lastDashboardRenderKey = dashboardRenderKey;
+
+    // Headings
+    document.getElementById('dash-project-name').innerText = state.config?.workspace_name || "本地数据工作台";
+    document.getElementById('dash-baseline').innerText = `同步数据基线：自 ${state.config?.min_publish_date || '未知'} 起`;
+
+    // Metrics
+    document.getElementById('m-enabled-count').innerText = state.configSummary.enabled_platform_count || 0;
+    document.getElementById('m-auth-count').innerText = state.configSummary.authorized_platform_count || 0;
+    document.getElementById('m-total-rows').innerText = state.allRows || 0;
+    renderHistoryCount();
+
+    const authAllBtn = document.getElementById('btn-auth-all');
+    const enabledPlatforms = getEnabledPlatformIds();
+    const pendingAuthPlatforms = enabledPlatforms.filter((p) => {
+      const authStatus = String(state.progress[p]?.auth_status || '').trim();
+      return ['unauthorized', 'expired', 'needs_auth'].includes(authStatus);
+    });
+    if (authAllBtn) {
+      authAllBtn.style.display = pendingAuthPlatforms.length > 0 ? '' : 'none';
+      authAllBtn.disabled = Boolean(state.progress.running) || pendingAuthPlatforms.length === 0;
+      authAllBtn.innerText = pendingAuthPlatforms.length > 1 ? `一键授权 ${pendingAuthPlatforms.length} 个平台` : '一键授权所选平台';
+    }
+
+    // Running Pane
+    const taskPane = document.getElementById('dash-task-pane');
+    const feishuRuntime = state.progress.summary?.feishu || {};
+    const authHealthChecking = state.progress.summary?.current_stage === 'auth_checking';
+    if (state.progress.running && authHealthChecking) {
+       resetCollectionJourneyVisualProgress();
+       taskPane.classList.add('active', 'is-auth-checking');
+       taskPane.classList.remove('is-running', 'needs-action');
+       const checkingPlatform = state.progress.summary?.auth_health?.active_platform || state.progress.summary?.active_platform;
+       document.getElementById('task-step-title').innerText = '正在检查账号登录态';
+       document.getElementById('task-step-desc').innerText = checkingPlatform
+         ? `正在后台检查 ${LABELS[checkingPlatform] || checkingPlatform}，不会打开登录窗口`
+         : '正在后台检查账号状态，不会打开登录窗口';
+    } else if (state.progress.running) {
+       taskPane.classList.add('active', 'is-running');
+       taskPane.classList.remove('needs-action', 'is-auth-checking');
+       renderCollectionJourney(state.progress, enabledPlatforms);
+       const isFeishuImporting = state.progress.summary?.current_stage === 'importing' && feishuRuntime.status === 'running';
+       if (isFeishuImporting) {
+         document.getElementById('task-step-title').innerText = '正在进行飞书同步';
+         document.getElementById('task-step-desc').innerText = feishuRuntime.message || '正在同步飞书，请稍候...';
+       } else {
+         document.getElementById('task-step-title').innerText = '正在采集平台数据';
+         let activePlatformData = state.progress[state.progress.summary?.active_platform];
+         if(activePlatformData) {
+         document.getElementById('task-step-desc').innerText = activePlatformData.message || `正在采集 ${LABELS[state.progress.summary?.active_platform] || '平台'} 数据`;
+         } else {
+         document.getElementById('task-step-desc').innerText = '正在启动环境，请稍候...';
+         }
+       }
+    } else if (feishuRuntime.status === 'needs_auth') {
+       resetCollectionJourneyVisualProgress();
+       const taskTitle = document.getElementById('task-step-title');
+       const taskDesc = document.getElementById('task-step-desc');
+       const safeUrl = safeHref(feishuRuntime.verification_url || '');
+       taskPane.classList.add('active');
+       taskPane.classList.remove('is-running', 'is-auth-checking');
+       taskPane.classList.add('needs-action');
+       taskTitle.innerText = '飞书需要重新授权';
+       taskDesc.innerHTML = `
+         <div style="display:flex; flex-direction:column; gap:8px;">
+           <span>${escapeHtml(feishuRuntime.message || '飞书需要重新授权，请扫码完成后继续同步。')}</span>
+           <div style="display:flex; gap:8px; flex-wrap:wrap;">
+             ${safeUrl ? `<a class="btn btn-secondary" href="${safeUrl}" target="_blank" rel="noopener">打开飞书扫码</a>` : ''}
+             <button class="btn btn-ghost" onclick="triggerFeishuReauth()">重新生成授权链接</button>
+           </div>
+         </div>
+       `;
+    } else {
+       resetCollectionJourneyVisualProgress();
+       taskPane.classList.remove('active', 'is-running', 'is-auth-checking', 'needs-action');
+    }
+
+    // Platform Grid
+    const grid = document.getElementById('platform-grid-container');
+    let html = '';
+    // 我们显示所有的平台，禁用的灰显
+    PLATFORMS.forEach(p => {
+       const isEnabled = enabledPlatforms.includes(p);
+       const pData = state.progress[p] || {};
+       const isAuth = pData.auth_status === 'authorized';
+       const needsAuth = ['unauthorized', 'expired', 'needs_auth'].includes(String(pData.auth_status || '').trim());
+       const healthStatus = String(pData.auth_health_status || 'unknown');
+       const healthText = authHealthDisplay(pData);
+       const needsAuthLabel = pData.auth_status === 'unauthorized'
+         ? '尚未授权'
+         : (pData.auth_status === 'needs_auth' ? '需要授权' : '授权已过期');
+       let statusBadgeStr = needsAuth
+         ? `<span class="badge red">${needsAuthLabel}</span>`
+         : (healthStatus === 'unknown' || healthStatus === 'skipped'
+           ? '<span class="badge yellow">已授权 · 待复核</span>'
+           : '<span class="badge green">已授权 · 已检查</span>');
+       
+       // 优化：仅渲染启用的平台，防止主屏幕超长溢出（实现自适应免滑动要求）
+       if(!isEnabled) {
+          return; // skip rendering
+       }
+       
+       if (pData.ui_status === 'authorizing') {
+         statusBadgeStr = `<span class="badge yellow">授权中...</span>`;
+       } else if (pData.ui_status === 'running') {
+         statusBadgeStr = `<span class="badge yellow">采集进行中...</span>`;
+       } else if (pData.ui_status === 'failed') {
+         statusBadgeStr = `<span class="badge red">采集异常</span>`;
+       }
+
+       const safe = (val) => val || 0;
+
+       html += `
+         <div class="platform-card ${isEnabled ? '' : 'disabled'}">
+           <div class="platform-header">
+             <div class="platform-name">${LABELS[p]}</div>
+             ${statusBadgeStr}
+           </div>
+           <div style="font-size:12px; color:var(--text-muted); margin-bottom:4px;">
+             ${escapeHtml(pData.message || (isEnabled ? '待机中' : '此数据源已被禁用'))}
+           </div>
+           <div class="platform-auth-health" style="font-size:11px; color:var(--text-muted); margin-bottom:8px;">
+             ${escapeHtml(healthText)}
+           </div>
+           
+           <div class="platform-stats">
+             <div class="stat-item"><span class="stat-label">本次获取</span><span class="stat-val" style="color:var(--green-text);">${safe(pData.successWorks)}</span></div>
+             <div class="stat-item"><span class="stat-label">跳过</span><span class="stat-val">${safe(pData.skippedWorks)}</span></div>
+             <div class="stat-item"><span class="stat-label">失败</span><span class="stat-val" style="color:var(--danger-text);">${safe(pData.failedWorks)}</span></div>
+           </div>
+
+           <div class="platform-actions">
+             ${isEnabled ? `
+               <button class="btn btn-ghost" style="padding: 4px 8px; font-size:12px;" onclick="triggerAuth('${p}')">${needsAuth ? '去授权' : '账号重授权'}</button>
+               ${needsAuth ? '' : `<button class="btn btn-secondary" style="padding: 4px 12px; font-size:12px;" onclick="triggerRunSingle('${p}')">单跑此源</button>`}
+             ` : `
+               <button class="btn btn-ghost" style="padding: 4px 8px; font-size:12px;" onclick="document.getElementById('btn-settings').click()">去设置中启用</button>
+             `}
+           </div>
+         </div>
+       `;
+    });
+    grid.innerHTML = html;
+  }
+
+  function formatFeishuHistorySummary(summary) {
+    const text = String(summary || '').trim();
+    if (!text) return '';
+    const base = text.split('；')[0] || text;
+    const notes = [];
+    if (text.includes('OpenAPISetVisibleFields limited') || text.includes('主视图字段顺序更新失败')) {
+      notes.push('部分表格视图字段顺序未自动调整，不影响数据写入');
+    }
+    if (text.includes('OpenAPIUpdateField limited') || text.includes('选择字段选项更新失败')) {
+      notes.push('部分选择字段样式未自动更新，不影响数据写入');
+    }
+    if (text.includes('OpenAPIDeleteField limited') || text.includes('历史生成字段清理被飞书限流') || text.includes('历史生成字段删除失败')) {
+      notes.push('部分历史字段清理将在后续同步继续处理');
+    }
+    if (!notes.length) return text;
+    return `${base}（${notes.join('；')}）`;
+  }
+
+  function historyRunKey(run) {
+    return String(run?.run_id || run?.run_at || '');
+  }
+
+  window.toggleHistoryRun = (event) => {
+    const item = event?.currentTarget;
+    const runKey = item?.dataset?.runKey || '';
+    if (!runKey) return;
+    if (state.expandedHistoryRuns.has(runKey)) {
+      state.expandedHistoryRuns.delete(runKey);
+    } else {
+      state.expandedHistoryRuns.add(runKey);
+    }
+    item.classList.toggle('expanded', state.expandedHistoryRuns.has(runKey));
+  };
+
+  function renderHistory() {
+    const container = document.getElementById('history-list-container');
+    if (!state.historyRuns || state.historyRuns.length === 0) {
+      container.innerHTML = `<div class="form-text" style="padding: 32px 0;">尚无相关同步历史记录，请先在控制台执行一次完整同步。</div>`;
+      return;
+    }
+
+    let html = '';
+    const visibleRunKeys = new Set();
+    state.historyRuns.forEach(run => {
+      const runKey = historyRunKey(run);
+      if (runKey) visibleRunKeys.add(runKey);
+      const expandedClass = runKey && state.expandedHistoryRuns.has(runKey) ? ' expanded' : '';
+      let validResults = run.platform_results || [];
+      
+      // UI补丁：过滤掉本次未启用的平台，防止早期强跑6个平台时展示错误
+      if (state.config && state.config.enabled_platforms && state.config.enabled_platforms.length > 0) {
+         const filtered = validResults.filter(pRes => state.config.enabled_platforms.includes(pRes.platform));
+         if (filtered.length > 0) validResults = filtered;
+      }
+      
+      const feishuIssue = run.feishu?.attempted && run.feishu.status === 'failed';
+      const isSuccess = !feishuIssue && (
+        ['completed', 'completed_empty'].includes(run.status) ||
+        (validResults.length > 0 && validResults.every(p => ['success', 'completed_empty'].includes(p.status)))
+      );
+      const statusText = isSuccess ? 'SUCCESS' : 'FAILED';
+      const statusClass = isSuccess ? 'success' : 'failed';
+      const runTime = run.run_at || '未知时间';
+      const feishuBaseUrl = String(run.feishu?.base_url || '');
+      const safeFeishuBaseUrl = feishuBaseUrl ? safeHref(feishuBaseUrl) : '#';
+
+      html += `
+        <div class="history-item history-item-${statusClass}${expandedClass}" data-run-key="${escapeHtml(runKey)}" onclick="toggleHistoryRun(event)">
+          <div class="history-header">
+            <div class="history-header-left">
+               <div class="history-time-block">
+                 <span class="history-time">${escapeHtml(runTime)}</span>
+               </div>
+            </div>
+            <div class="history-status-wrap">
+              <span class="history-status-word">${statusText}</span>
+              <span class="history-chevron">▼</span>
+            </div>
+          </div>
+          <div class="history-details">
+             <p style="font-size:12px; color:var(--text-muted); margin-bottom: 16px;">运行编号：#${escapeHtml(run.run_id || 'RUN')} ｜ 执行时长：${escapeHtml(run.duration)}s ｜ 覆盖核心平台：${validResults.length} 个</p>
+             <p style="font-size:13px; font-weight:600; margin-bottom:8px;">飞书导入结果</p>
+             <p style="font-size:12px; color:var(--text-muted); margin-bottom: 16px;">
+               ${run.feishu?.attempted ? `状态: ${escapeHtml(run.feishu.status)} | 摘要: ${escapeHtml(formatFeishuHistorySummary(run.feishu.summary))}` : '未触发飞书操作'}
+               ${safeFeishuBaseUrl !== '#' ? `<br><a href="${safeFeishuBaseUrl}" target="_blank" rel="noopener" onclick="event.stopPropagation()" style="color:var(--primary); text-decoration:none;">打开本次同步的飞书多维表</a>` : ''}
+             </p>
+             <p style="font-size:13px; font-weight:600; margin-bottom:8px;">分平台详情</p>
+             <div class="grid-2">
+               ${validResults.map(pr => `
+                 <div style="font-size:12px; border:1px solid var(--border); padding:8px; border-radius:var(--radius-sm);">
+                   <strong style="margin-bottom:4px; display:block;">${escapeHtml(pr.label)} (${escapeHtml(pr.status)})</strong>
+                   成功: ${pr.success_count} / 跳过: ${pr.skip_count} / 失败: ${pr.fail_count} <br>
+                   ${pr.error ? `<span style="color:var(--danger-text)">${escapeHtml(pr.error)}</span>` : ''}
+                 </div>
+               `).join('')}
+             </div>
+          </div>
+        </div>
+      `;
+    });
+    state.expandedHistoryRuns.forEach((runKey) => {
+      if (!visibleRunKeys.has(runKey)) state.expandedHistoryRuns.delete(runKey);
+    });
+    container.innerHTML = html;
+  }
+
+  function renderView() {
+    renderSidebarStatus();
+    renderUpdateWidget();
+    renderSessionOverlay();
+    renderLicenseOverlay();
+
+    if (state.sessionRequired) {
+      document.getElementById('license-overlay').classList.add('hidden');
+      document.getElementById('wizard-overlay').classList.add('hidden');
+      return;
+    }
+
+    if (state.licenseBlocking) {
+      document.getElementById('wizard-overlay').classList.add('hidden');
+      return;
+    }
+
+    if (state.forceWizard) {
+      renderWizard();
+      return;
+    }
+    
+    // 如果向导没完成，直接渲染向导
+    if (!isOnboardingCompleted()) {
+      if (!initialConfigLoaded && !state.config) {
+        document.getElementById('wizard-overlay').classList.add('hidden');
+        lastWizardRenderKey = '';
+        return;
+      }
+      renderWizard();
+      return; 
+    } 
+    // 强制关闭向导
+    document.getElementById('wizard-overlay').classList.add('hidden');
+    lastWizardRenderKey = '';
+
+    document.querySelectorAll('.nav-item').forEach(el => {
+      el.classList.toggle('active', el.dataset.view === state.activeView);
+    });
+
+    document.querySelectorAll('.view-container').forEach(el => {
+      el.classList.remove('active');
+    });
+
+    const activeEl = document.getElementById(`view-${state.activeView}`);
+    if (activeEl) {
+      activeEl.classList.add('active');
+    }
+
+    if (state.activeView === 'dashboard') renderDashboard();
+    if (state.activeView === 'history') renderHistory();
+  }
+
+  /*********************************************
+   * 4. 业务操作 Action Handlers
+   *********************************************/
+  
+  // 向导交互
+  let _togglePlatformInFlight = false;
+  let _pendingPlatformSnapshot = null;
+  let _platformWritePromise = null;
+
+  function enqueuePlatformWrite(snapshot) {
+    _pendingPlatformSnapshot = snapshot.slice();
+    if (_platformWritePromise) return _platformWritePromise;
+
+    _togglePlatformInFlight = true;
+    _platformWritePromise = (async () => {
+      while (_pendingPlatformSnapshot) {
+        const next = _pendingPlatformSnapshot;
+        _pendingPlatformSnapshot = null;
+        const saveRes = await api.post(
+          '/config',
+          { enabled_platforms: next },
+          { timeoutMs: 15000 },
+        );
+        if (saveRes?.error === 'session_required') {
+          _pendingPlatformSnapshot = null;
+          setSessionRequired();
+          renderView();
+          return;
+        }
+        if (!saveRes) {
+          showToast('平台选择保存超时，请检查后端连接后重试', 'error');
+          return;
+        }
+        if (!_pendingPlatformSnapshot) {
+          if (saveRes.config) {
+            state.config = { ...saveRes.config, enabled_platforms: next.slice() };
+          } else {
+            state.config.enabled_platforms = next.slice();
+          }
+          if (saveRes.summary) {
+            state.configSummary = { ...(state.configSummary || {}), ...saveRes.summary };
+          }
+        }
+      }
+    })().finally(() => {
+      _togglePlatformInFlight = false;
+      _platformWritePromise = null;
+      renderWizard();
+    });
+    return _platformWritePromise;
+  }
+
+  window.togglePlatform = async (p, isChecked) => {
+    if (!state.config) {
+      setSessionRequired();
+      renderView();
+      return;
+    }
+    let arr = [...(state.config.enabled_platforms || [])];
+    if (isChecked && !arr.includes(p)) arr.push(p);
+    if (!isChecked) arr = arr.filter(x => x !== p);
+    state.config.enabled_platforms = arr;
+    renderWizard();
+    await enqueuePlatformWrite(arr);
+    await pollBackendData();
+  };
+
+  function missingOnboardingAuthorizations() {
+    const enabled = [...new Set(state.config?.enabled_platforms || [])];
+    const summaryAuthorized = state.configSummary?.authorized_platforms;
+    const authorized = new Set(
+      Array.isArray(summaryAuthorized)
+        ? summaryAuthorized
+        : enabled.filter((platform) => state.progress?.[platform]?.auth_status === 'authorized'),
+    );
+    return enabled.filter((platform) => !authorized.has(platform));
+  }
+
+  function canCompleteOnboarding() {
+    const enabled = state.config?.enabled_platforms || [];
+    return enabled.length > 0 && missingOnboardingAuthorizations().length === 0;
+  }
+
+  function showMissingAuthorizationMessage() {
+    const labels = missingOnboardingAuthorizations().map((platform) => LABELS[platform] || platform);
+    showToast(`请先完成这些平台的授权：${labels.join('、')}`, 'error');
+  }
+
+  document.getElementById('wiz-btn-prev').addEventListener('click', () => {
+    if (state.forceWizard && state.wizardStep === 4) {
+      closeForcedWizard();
+      return;
+    }
+    if (state.wizardStep > 1) {
+      state.wizardStep--;
+      renderWizard();
+    }
+  });
+
+  document.getElementById('wiz-btn-next').addEventListener('click', async () => {
+    if (state.sessionRequired || !state.config) {
+      setSessionRequired();
+      renderView();
+      return;
+    }
+
+    // 验证平台选择 (Step 1)
+    if (state.wizardStep === 1) {
+      if (!state.config?.enabled_platforms || state.config.enabled_platforms.length === 0) {
+        showToast('请至少选择一个目标平台进行采集', 'error');
+        return;
+      }
+    }
+
+    if (state.wizardStep === 2) {
+      await pollBackendData({ lightweight: true });
+      if (!canCompleteOnboarding()) {
+        showMissingAuthorizationMessage();
+        return;
+      }
+    }
+
+    // 保存基本设置 (Step 3)
+    if (state.wizardStep === 3) {
+      const custName = document.getElementById('wiz-cust-name').value;
+      const wsName = document.getElementById('wiz-ws-name').value;
+      if (!custName.trim() || !wsName.trim()) {
+        showToast('请先填写客户名称和项目名称', 'error');
+        return;
+      }
+      state.config.customer_name = custName;
+      state.config.workspace_name = wsName;
+      state.config.browser_channel = document.getElementById('wiz-browser').value;
+
+      const res = await api.post('/config', state.config);
+      if (res?.ok) {
+        if (res.config) state.config = res.config;
+        showToast('配置已保存', 'success');
+      } else {
+        showToast('保存配置异常', 'error');
+      }
+    }
+
+    // 飞书同步步骤 (Step 4)
+    if (state.wizardStep === 4) {
+      const phase = state.feishuSetupPhase || 'choose';
+      const choice = state.feishuSetupChoice;
+
+      if (phase === 'choose') {
+        if (!choice) {
+          showToast('请选择一个飞书同步选项', 'error');
+          return;
+        }
+        if (choice === 'skip') {
+          if (state.forceWizard) {
+            closeForcedWizard();
+            return;
+          }
+          state.wizardStep = 5;
+          renderWizard();
+          return;
+        }
+        // "create" or "existing" — single scan flow
+        startFeishuConnect();
+        return;
+      }
+
+      if (phase === 'done' || phase === 'ready') {
+        if (state.forceWizard) {
+          state.forceWizard = false;
+          state.feishuSetupChoice = null;
+          showToast('飞书同步配置完成', 'success');
+          renderView();
+          return;
+        }
+        state.wizardStep = 5;
+        renderWizard();
+        return;
+      }
+
+      // In other phases (connecting, scan_qr, creating_base), don't advance
+      return;
+    }
+
+    // 完成向导 (Step 5)
+    if (state.wizardStep === 5) {
+       await pollBackendData({ lightweight: true });
+       if (!canCompleteOnboarding()) {
+         showMissingAuthorizationMessage();
+         state.wizardStep = 2;
+         renderWizard();
+         return;
+       }
+       const d = document.getElementById('wiz-start-date').value;
+       if (!d) return showToast('请输入有效的起始同步日期', 'error');
+       state.config.min_publish_date = d;
+       state.config.onboarding_completed = true;
+       const saveRes = await api.post('/config', state.config);
+       if (saveRes?.config) state.config = saveRes.config;
+
+       showToast('初始化完成，正在启动首次同步...', 'success');
+       await pollBackendData();
+       triggerRunAll(`?min_date=${d}`);
+       return;
+    }
+
+    if (state.wizardStep < 5) {
+      state.wizardStep++;
+      renderWizard();
+    }
+  });
+
+  // 主页操作
+  document.getElementById('btn-download-excel').addEventListener('click', () => {
+    // 弹出选择：下载全平台汇总 or 单平台
+    const enabled = state.config?.enabled_platforms || [];
+    let options = [{ key: 'all', label: '全平台汇总数据' }];
+    enabled.forEach(p => options.push({ key: p, label: LABELS[p] }));
+
+    if (options.length <= 2) {
+      // 只有1个平台或没有，直接下载汇总
+      window.open(withSessionQuery(withEnabledPlatformsQuery('/download-excel?file=all')), '_blank');
+      showToast('正在下载全平台汇总 Excel', 'success');
+      return;
+    }
+
+    // 多平台时弹出选择
+    let selectHtml = options.map(o => `<option value="${o.key}">${o.label}</option>`).join('');
+    const sel = prompt('选择要下载的数据（输入序号）：\n' + options.map((o, i) => `${i}: ${o.label}`).join('\n'), '0');
+    if (sel === null) return;
+    const idx = parseInt(sel);
+    const chosen = options[idx] || options[0];
+    const downloadUrl = chosen.key === 'all'
+      ? withEnabledPlatformsQuery('/download-excel?file=all')
+      : `/download-excel?file=${chosen.key}`;
+    window.open(withSessionQuery(downloadUrl), '_blank');
+    showToast(`正在下载 ${chosen.label} Excel`, 'success');
+  });
+
+  document.getElementById('btn-auth-all').addEventListener('click', () => triggerAuthAll());
+  document.getElementById('btn-run-all').addEventListener('click', () => triggerRunAll());
+  document.getElementById('btn-sync-feishu').addEventListener('click', () => {
+    const enabled = state.config?.enabled_platforms || [];
+    const params = new URLSearchParams();
+    params.set('force_full_sync', '1');
+    if (enabled.length > 0) params.set('platforms', enabled.join(','));
+    const query = `?${params.toString()}`;
+    api.post(`/sync_feishu${query}`).then(r => {
+      if (r?.ok || r?.accepted) {
+        showToast(r?.message || '飞书独立同步任务已分发', 'success');
+        runImmediateRefresh({ includeHistory: true });
+        startFastPoll({ durationMs: 15000, includeHistory: true });
+        return;
+      }
+      if (r?.error === 'feishu_user_auth_required') {
+        showToast(r?.message || '飞书需要补充用户授权，请扫码后重试同步。');
+        pollBackendData();
+        return;
+      }
+      if (r?.error === 'feishu_permission_required') {
+        showToast(r?.message || '请先给目标多维表格开通飞书文档应用/机器人编辑权限，再重试同步。', 'error');
+        pollBackendData();
+        return;
+      }
+      showToast(r?.message || '任务提交失败', 'error');
+    });
+  });
+
+  document.getElementById('btn-rerun').addEventListener('click', () => {
+    document.getElementById('modal-rerun').classList.remove('hidden');
+    document.getElementById('rerun-start-date').value = state.config?.min_publish_date || '';
+  });
+
+  document.getElementById('modal-rerun-close').addEventListener('click', () => {
+    document.getElementById('modal-rerun').classList.add('hidden');
+  });
+
+  document.getElementById('btn-confirm-rerun').addEventListener('click', () => {
+    const s = document.getElementById('rerun-start-date').value;
+    if(!s) return showToast("必须选择起始日期", "error");
+    const nextConfig = { ...(state.config || {}), min_publish_date: s };
+    api.post('/config', nextConfig).then(r => {
+      if (r?.ok) {
+        if (r.config) state.config = r.config;
+        document.getElementById('modal-rerun').classList.add('hidden');
+        showToast("同步日期已保存", "success");
+        pollBackendData();
+        return;
+      }
+      if (r?.error === 'session_required') {
+        setSessionRequired();
+        renderView();
+        return;
+      }
+      showToast(r?.message || "保存失败", "error");
+    });
+  });
+
+  // 设置弹窗
+  document.getElementById('btn-settings').addEventListener('click', () => {
+    // 构建设置表单
+    const body = document.getElementById('settings-form-body');
+    const c = state.config || {};
+    const feishuConfigured = Boolean(c.feishu_credentials_saved);
+    const maskedId = escapeHtml(c.feishu_app_id_masked || '');
+    const maskedToken = escapeHtml(c.feishu_app_token_masked || '');
+    body.innerHTML = `
+      <div class="form-group">
+        <label>客户名称</label>
+        <input type="text" class="form-control" id="st-cust-name" value="${escapeHtml(c.customer_name||'')}">
+      </div>
+      <div class="form-group">
+        <label>工作台名称</label>
+        <input type="text" class="form-control" id="st-ws-name" value="${escapeHtml(c.workspace_name||'')}">
+      </div>
+      <div style="display:flex; gap:12px;">
+        <div class="form-group" style="flex:1;">
+          <label>默认数据起点日期</label>
+          <input type="date" class="form-control" id="st-min-date" value="${escapeHtml(c.min_publish_date||'')}">
+        </div>
+        <div class="form-group" style="flex:1;">
+          <label>授权浏览器</label>
+          <input type="hidden" id="st-browser" value="chrome">
+          <div class="form-text">固定使用 Chrome 内核；如本机没有 Google Chrome，将自动切换到内置 Chrome 运行时。</div>
+        </div>
+      </div>
+      <div class="form-group" style="padding-top:10px; border-top:1px solid var(--border);">
+        <label>平台启停开关</label>
+        <div class="grid-2">
+          ${PLATFORMS.map(p => `
+            <label style="display:flex;align-items:center;gap:6px; font-weight:normal; font-size:13px;">
+              <input type="checkbox" id="st-p-${p}" ${(c.enabled_platforms||[]).includes(p)?'checked':''}>
+              ${LABELS[p]}
+            </label>
+          `).join('')}
+        </div>
+      </div>
+      <div class="form-group" style="padding-top:10px; border-top:1px solid var(--border);">
+        <label style="font-weight:600;">飞书同步</label>
+        <div class="switch-group">
+          <div class="switch-label"><span class="switch-title">启用飞书同步</span></div>
+          <input type="checkbox" id="st-feishu-enabled" ${c.feishu_enabled?'checked':''}>
+        </div>
+        <div class="switch-group" style="margin-top:6px;">
+          <div class="switch-label"><span class="switch-title">采集后自动同步飞书</span></div>
+          <input type="checkbox" id="st-feishu-auto" ${c.feishu_auto_sync?'checked':''}>
+        </div>
+      </div>
+      <div class="form-group" style="padding-top:10px; border-top:1px solid var(--border);">
+        <label style="font-weight:600;">飞书连接凭据</label>
+        ${feishuConfigured ? `
+          <div style="display:flex; align-items:center; gap:8px; padding:8px 12px; background:rgba(34,197,94,0.08); border:1px solid rgba(34,197,94,0.2); border-radius:8px; margin-bottom:8px;">
+            <span style="color:var(--success); font-size:14px;">●</span>
+            <span style="font-size:13px;">已配置${maskedId || maskedToken ? ` (App: ${maskedId || '已保存'} / Token: ${maskedToken || '已保存'})` : ''}</span>
+          </div>
+        ` : `
+          <div style="display:flex; align-items:center; gap:8px; padding:8px 12px; background:var(--bg-secondary); border:1px solid var(--border); border-radius:8px; margin-bottom:8px;">
+            <span style="color:var(--text-muted); font-size:14px;">○</span>
+            <span style="font-size:13px; color:var(--text-muted);">未配置</span>
+          </div>
+        `}
+        <div style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:8px;">
+          <button class="btn btn-secondary" type="button" id="btn-open-feishu-setup" onclick="openFeishuSetupFromSettings()">
+            ${feishuConfigured ? '重新配置飞书同步' : '连接飞书同步'}
+          </button>
+        </div>
+        <details style="margin-top:4px;">
+          <summary style="cursor:pointer; font-size:12px; color:var(--text-muted);">手动编辑凭据（高级）</summary>
+          <div style="margin-top:8px;">
+            <input type="text" class="form-control" id="st-fs-token" value="" placeholder="${maskedToken ? `留空保持已保存 Token：${maskedToken}` : 'App Token'}" style="margin-bottom:6px;">
+            <div style="display:flex; gap:12px;">
+              <input type="text" class="form-control" id="st-fs-id" value="" placeholder="${maskedId ? `留空保持已保存 App ID：${maskedId}` : 'App ID'}">
+              <input type="password" class="form-control" id="st-fs-secret" value="" placeholder="${feishuConfigured ? '留空保持已保存 App Secret' : 'App Secret'}">
+            </div>
+            <label style="display:flex; align-items:center; gap:6px; font-size:12px; color:var(--text-muted); margin-top:8px;">
+              <input type="checkbox" id="st-fs-clear">
+              清空已保存的飞书凭据
+            </label>
+          </div>
+        </details>
+      </div>
+    `;
+    document.getElementById('modal-settings').classList.remove('hidden');
+  });
+
+  document.getElementById('modal-settings-close').addEventListener('click', () => {
+    document.getElementById('modal-settings').classList.add('hidden');
+    renderView();
+  });
+
+  document.getElementById('btn-save-settings').addEventListener('click', async () => {
+    if (!state.config) {
+      setSessionRequired();
+      renderView();
+      return;
+    }
+    state.config.customer_name = document.getElementById('st-cust-name').value;
+    state.config.workspace_name = document.getElementById('st-ws-name').value;
+    state.config.min_publish_date = document.getElementById('st-min-date').value;
+    state.config.browser_channel = document.getElementById('st-browser').value;
+    state.config.feishu_enabled = document.getElementById('st-feishu-enabled').checked;
+    state.config.feishu_auto_sync = document.getElementById('st-feishu-auto').checked;
+
+    let ep = [];
+    PLATFORMS.forEach(p => {
+       if(document.getElementById(`st-p-${p}`).checked) ep.push(p);
+    });
+    state.config.enabled_platforms = ep;
+    const fsToken = document.getElementById('st-fs-token').value.trim();
+    const fsId = document.getElementById('st-fs-id').value.trim();
+    const fsSecret = document.getElementById('st-fs-secret').value.trim();
+    const clearSecrets = document.getElementById('st-fs-clear').checked;
+    const payload = { ...state.config };
+    if (clearSecrets || fsToken || fsId || fsSecret) {
+      payload.feishu_app_token = clearSecrets ? '' : fsToken;
+      payload.feishu_app_id = clearSecrets ? '' : fsId;
+      payload.feishu_app_secret = clearSecrets ? '' : fsSecret;
+    }
+
+    const r = await api.post('/config', payload);
+    if (r?.error === 'session_required') {
+       setSessionRequired();
+       renderView();
+       return;
+    }
+    if(r?.ok) {
+       if (r.config) state.config = r.config;
+       showToast("配置已保存", "success");
+       document.getElementById('modal-settings').classList.add('hidden');
+       pollBackendData();
+    } else {
+       showToast("保存失败，请重试", "error");
+    }
+  });
+
+  document.getElementById('btn-reset-onboarding').addEventListener('click', async () => {
+    if(confirm("将清除核心业务凭据标志位，您确定要重置并回到向导页面吗？")) {
+       await api.post('/reset_onboarding');
+       window.location.reload();
+    }
+  });
+
+  document.getElementById('btn-test-feishu').addEventListener('click', async () => {
+    showToast("请求发送中...");
+    const payload = { feishu_enabled: true };
+    const fsToken = document.getElementById('st-fs-token')?.value?.trim() || '';
+    const fsId = document.getElementById('st-fs-id')?.value?.trim() || '';
+    const fsSecret = document.getElementById('st-fs-secret')?.value?.trim() || '';
+    if (fsToken) payload.feishu_app_token = fsToken;
+    if (fsId) payload.feishu_app_id = fsId;
+    if (fsSecret) payload.feishu_app_secret = fsSecret;
+    const r = await api.post('/config/test_feishu', payload);
+    if(r?.ok) showToast("飞书连接测试正常", "success");
+    else showToast(r?.message || "飞书连接失败，请检查凭据", "error");
+  });
+
+  // 分发运行方法
+  window.triggerAuth = async (platformName) => {
+    const res = await api.post(`/auth_single?platform=${platformName}`);
+    if (res?.ok || res?.accepted) {
+      showToast(`正在吊起系统浏览器对 ${LABELS[platformName]} 进行安全授权...`);
+      await runImmediateRefresh();
+      startFastPoll();
+      return;
+    }
+    showToast(res?.message || `无法启动 ${LABELS[platformName]} 授权流程`, "error");
+  };
+
+  window.triggerAuthAll = async () => {
+    const enabled = state.config?.enabled_platforms || [];
+    if (!enabled.length) {
+      showToast('请先至少启用一个平台', 'error');
+      return;
+    }
+    const params = new URLSearchParams();
+    params.set('platforms', enabled.join(','));
+    const res = await api.post(`/auth_all?${params.toString()}`);
+    if (res?.ok || res?.accepted) {
+      showToast(res?.message || '已开始按所选平台逐个拉起授权窗口', 'success');
+      await runImmediateRefresh();
+      startFastPoll({ durationMs: 120000 });
+      return;
+    }
+    showToast(res?.message || '无法启动一键授权流程', 'error');
+  };
+
+  window.triggerRunSingle = async (platformName) => {
+    const route = RUN_ROUTE_MAP[platformName];
+    if (!route) return showToast(`未知平台: ${platformName}`, 'error');
+    const res = await api.post(`${route}?headless=true`);
+    if (res?.ok || res?.accepted) {
+      showToast(`单平台 ${LABELS[platformName]} 采集任务已提交`, 'success');
+      return;
+    }
+    showToast(res?.message || `无法启动 ${LABELS[platformName]} 采集任务`, 'error');
+  };
+
+  window.triggerRunAll = async (query="") => {
+    let finalQuery = query;
+    // Ensure headless is set
+    if (!finalQuery.includes('headless=')) {
+      const qChar = finalQuery.includes('?') ? '&' : '?';
+      finalQuery += `${qChar}headless=true`;
+    }
+    if (state.config && state.config.enabled_platforms && state.config.enabled_platforms.length > 0) {
+      finalQuery += `&platforms=${state.config.enabled_platforms.join(',')}`;
+    }
+    const res = await api.post(`/run_all${finalQuery}`);
+    if(res?.ok || res?.accepted) {
+      showToast("同步任务已启动，请查看实时状态", "success");
+      await runImmediateRefresh({ includeHistory: true });
+      startFastPoll({ durationMs: 15000, includeHistory: true });
+    } else {
+      showToast(res?.message || "任务启动失败", "error");
+    }
+  };
+
+  // 导航栏切换
+  document.querySelectorAll('.nav-item[data-view]').forEach(item => {
+    item.addEventListener('click', (e) => {
+      state.activeView = e.currentTarget.dataset.view;
+      renderView();
+      if (state.activeView === 'history') {
+        refreshHistoryData({ force: true });
+      }
+    });
+  });
+
+  /*********************************************
+   * 5. 核心轮询机制 Core Engine
+   *********************************************/
+  let initialConfigLoaded = false;
+
+  document.getElementById('btn-session-reload').addEventListener('click', () => {
+    window.location.reload();
+  });
+  
+  async function pollBackendData({ retriedSession = false, includeHistory = false, lightweight = false } = {}) {
+    // 基础防重叠锁
+    if (state.busyKey || backendPollInFlight || state.licenseBlocking || state.sessionRequired) return;
+
+    backendPollInFlight = true;
+    try {
+      const setupLightPoll = lightweight || (shouldUseLightPolling() && !includeHistory);
+      const runLightPoll = Boolean(state.progress?.running) && !includeHistory;
+
+      // 初始化阶段只拉最小必要状态，避免 /all-data 和历史接口把主线程与网络都压满。
+      const shouldFetchConfig = !initialConfigLoaded || !state.config || isSettingsModalOpen() || !state.configSummary?.setup_complete;
+      const shouldFetchAllRows = !setupLightPoll && !runLightPoll;
+
+      // 并行获取
+      const [prog, allRows, historyData, conf] = await Promise.all([
+        api.get('/progress'),
+        shouldFetchAllRows ? api.get('/all-data') : Promise.resolve(null),
+        (!setupLightPoll && !runLightPoll && includeHistory) ? api.get('/analytics/history?limit=10') : Promise.resolve(null),
+        shouldFetchConfig ? api.get('/config') : Promise.resolve(null)
+      ]);
+
+      if (prog) {
+        state.progress = prog;
+        if (prog.summary) {
+          state.configSummary = { ...(state.configSummary || {}), ...prog.summary };
+        }
+      }
+
+      const protectedResponses = [conf, allRows, historyData].filter(Boolean);
+      const licenseBlocked = protectedResponses.find((item) => item?.error === 'license_invalid');
+      if (licenseBlocked) {
+        setLicenseBlocking({
+          activated: true,
+          error: licenseBlocked.license_error || '',
+          message: licenseBlocked.message || '许可证无效，请重新激活'
+        });
+        renderView();
+        return;
+      }
+
+      const needsSession = protectedResponses.find((item) => item?.error === 'session_required');
+      if (needsSession) {
+        if (!retriedSession && await recoverSession()) {
+          return pollBackendData({ retriedSession: true, includeHistory, lightweight });
+        }
+        setSessionRequired();
+        renderView();
+        return;
+      }
+
+      if (conf && conf.config) {
+        // toggle 进行中时，远端返回的是旧快照，保留本地的 enabled_platforms
+        if (_togglePlatformInFlight) {
+          conf.config.enabled_platforms = state.config?.enabled_platforms || [];
+        }
+        state.config = conf.config;
+        if (conf.summary) state.configSummary = { ...state.configSummary, ...conf.summary };
+        initialConfigLoaded = true;
+        clearSessionRequired();
+        clearLicenseBlocking();
+      }
+      if (allRows) state.allRows = allRows.row_count || (allRows.rows ? allRows.rows.length : 0);
+      if (historyData?.runs && Array.isArray(historyData.runs)) {
+        state.historyRuns = historyData.runs;
+        lastHistoryPollAt = Date.now();
+      }
+
+      // Detect stale running platforms (no update for too long = probably crashed)
+      if (state.progress && state.progress.running) {
+        for (const pid of PLATFORMS) {
+          const pState = state.progress[pid];
+          if (pState && pState.status === 'running' && pState.updatedAt) {
+            const lastUpdate = new Date(pState.updatedAt).getTime();
+            if (!isNaN(lastUpdate) && Date.now() - lastUpdate > STALE_RUNNING_THRESHOLD_MS) {
+              if (!staleRunningNotified.has(pid)) {
+                staleRunningNotified.add(pid);
+                showToast(`${LABELS[pid] || pid} 采集状态长时间未更新，可能已中断。建议点击"释放锁定"后重试。`, 'error');
+              }
+            }
+          } else {
+            staleRunningNotified.delete(pid);
+          }
+        }
+      } else {
+        staleRunningNotified.clear();
+      }
+
+      renderView();
+    } finally {
+      backendPollInFlight = false;
+    }
+  }
+
+  async function refreshHistoryData({ force = false, retriedSession = false } = {}) {
+    if (shouldUseLightPolling()) return;
+    if (state.busyKey || state.licenseBlocking || state.sessionRequired || historyPollInFlight) return;
+    const now = Date.now();
+    if (!force && now - lastHistoryPollAt < HISTORY_POLL_INTERVAL_MS) return;
+    historyPollInFlight = true;
+    try {
+      const historyData = await api.get('/analytics/history?limit=10');
+      if (historyData?.error === 'license_invalid') {
+        setLicenseBlocking({
+          activated: true,
+          error: historyData.license_error || '',
+          message: historyData.message || '许可证无效，请重新激活'
+        });
+        renderView();
+        return;
+      }
+      if (historyData?.error === 'session_required') {
+        if (!retriedSession && await recoverSession()) {
+          return refreshHistoryData({ force: true, retriedSession: true });
+        }
+        setSessionRequired();
+        renderView();
+        return;
+      }
+      if (historyData?.runs && Array.isArray(historyData.runs)) {
+        state.historyRuns = historyData.runs;
+        lastHistoryPollAt = now;
+        if (state.activeView === 'history') renderHistory();
+        renderHistoryCount();
+      }
+    } finally {
+      historyPollInFlight = false;
+    }
+  }
+
+  async function checkForUpdates({ silent = false, force = false } = {}) {
+    if (state.sessionRequired || updateCheckInFlight) return;
+    const now = Date.now();
+    if (!force && state.updateCheckedOnce && now - lastUpdateCheckAt < UPDATE_CHECK_INTERVAL_MS) return;
+    updateCheckInFlight = true;
+    state.updateBusy = true;
+    state.updateError = '';
+    renderUpdateWidget();
+    try {
+      const res = await api.get('/update/check');
+      state.updateCheckedOnce = true;
+      lastUpdateCheckAt = Date.now();
+      if (res?.error === 'session_required') {
+        if (await recoverSession()) {
+          state.updateBusy = false;
+          updateCheckInFlight = false;
+          return checkForUpdates({ silent, force: true });
+        }
+        setSessionRequired();
+        return;
+      }
+      if (res?.error === 'license_invalid') {
+        setLicenseBlocking({ activated: true, message: res.message || '许可证无效，请重新激活' });
+        return;
+      }
+      if (!res?.ok) {
+        if (res?.error === 'update_service_not_configured' || res?.update_status === 'not_configured') {
+          state.updateInfo = {
+            ...res,
+            current: res?.current || { build_version: getCurrentBuildVersion() },
+            latest: res?.latest || {},
+            update_available: false,
+            unavailable: true,
+            update_status: 'not_configured',
+          };
+          state.updateError = '';
+          if (!silent) showToast('当前版本未配置自动更新服务');
+          return;
+        }
+        state.updateInfo = {
+          ok: false,
+          current: { build_version: getCurrentBuildVersion() },
+          latest: {},
+          update_available: false,
+          unavailable: true,
+          error: res?.error || 'update_service_unavailable',
+        };
+        state.updateError = '暂时无法连接更新服务，请稍后重试';
+        if (!silent) showToast(state.updateError, 'error');
+        return;
+      }
+      state.updateInfo = res;
+      state.updateDownloadedPath = '';
+      state.updateDownloadProgress = null;
+      state.updateInstallStarted = false;
+      if (res.update_available && !silent) {
+        showToast(`发现新版 ${res.latest?.version || ''}`.trim(), 'success');
+      } else if (!silent) {
+        showToast('当前已经是最新版本', 'success');
+      }
+    } finally {
+      state.updateBusy = false;
+      updateCheckInFlight = false;
+      renderUpdateWidget();
+    }
+  }
+
+  function stopUpdateDownloadPolling() {
+    if (updateDownloadPollTimer) {
+      clearInterval(updateDownloadPollTimer);
+      updateDownloadPollTimer = null;
+    }
+  }
+
+  async function pollUpdateDownloadProgress() {
+    try {
+      const progress = await api.get('/update/download-progress');
+      if (!progress?.ok && progress?.status !== 'error') {
+        throw new Error(progress?.message || progress?.error || '读取下载进度失败');
+      }
+      state.updateDownloadProgress = progress;
+      if (progress.status === 'completed') {
+        state.updateDownloadedPath = progress.path || state.updateDownloadedPath;
+        state.updateBusy = false;
+        stopUpdateDownloadPolling();
+        renderUpdateWidget();
+        if (!state.updateInstallStarted && state.updateDownloadedPath) {
+          showToast('新版下载完成，开始安装并重启', 'success');
+          await installDownloadedUpdate({ auto: true });
+        }
+        return;
+      }
+      if (progress.status === 'error') {
+        state.updateBusy = false;
+        state.updateError = progress.message || progress.error || '下载新版失败';
+        stopUpdateDownloadPolling();
+        showToast(state.updateError, 'error');
+      }
+      renderUpdateWidget();
+    } catch (error) {
+      state.updateBusy = false;
+      state.updateError = error?.message || String(error);
+      stopUpdateDownloadPolling();
+      renderUpdateWidget();
+      showToast(state.updateError, 'error');
+    }
+  }
+
+  function startUpdateDownloadPolling() {
+    stopUpdateDownloadPolling();
+    updateDownloadPollTimer = setInterval(pollUpdateDownloadProgress, UPDATE_DOWNLOAD_POLL_MS);
+    pollUpdateDownloadProgress();
+  }
+
+  async function downloadAvailableUpdate() {
+    if (!state.updateInfo?.update_available || state.updateBusy) return;
+    state.updateBusy = true;
+    state.updateError = '';
+    state.updateInstallStarted = false;
+    renderUpdateWidget();
+    try {
+      const res = await api.post('/update/download', { latest: state.updateInfo.latest });
+      if (!res?.ok) {
+        state.updateError = res?.message || res?.error || '下载新版失败';
+        state.updateBusy = false;
+        showToast(state.updateError, 'error');
+        return;
+      }
+      state.updateDownloadProgress = res;
+      state.updateDownloadedPath = res.path || '';
+      if (res.status === 'completed' && state.updateDownloadedPath) {
+        state.updateBusy = false;
+        showToast('新版下载完成，开始安装并重启', 'success');
+        await installDownloadedUpdate({ auto: true });
+        return;
+      }
+      startUpdateDownloadPolling();
+    } catch (error) {
+      state.updateError = error?.message || String(error);
+      state.updateBusy = false;
+      showToast(state.updateError, 'error');
+    } finally {
+      renderUpdateWidget();
+    }
+  }
+
+  async function installDownloadedUpdate({ auto = false } = {}) {
+    if (!state.updateDownloadedPath || state.updateBusy) return;
+    state.updateInstallStarted = true;
+    state.updateDownloadProgress = {
+      ...(state.updateDownloadProgress || {}),
+      status: 'installing',
+      message: '正在安装新版，应用将自动重启...',
+      percent: 100,
+    };
+    renderUpdateWidget();
+    try {
+      const res = await api.post('/update/install', { path: state.updateDownloadedPath });
+      if (!res?.ok) {
+        state.updateInstallStarted = false;
+        state.updateError = res?.message || res?.error || '无法安装新版';
+        showToast(state.updateError, 'error');
+        renderUpdateWidget();
+        return;
+      }
+      if (!auto) showToast(res.message || '正在安装新版，应用将自动重启', 'success');
+    } catch (error) {
+      state.updateInstallStarted = false;
+      state.updateError = error?.message || String(error);
+      showToast(state.updateError, 'error');
+      renderUpdateWidget();
+    }
+  }
+
+  /*********************************************
+   * 许可证激活逻辑
+   *********************************************/
+  let licenseValid = false;
+
+  async function checkLicense({ retriedSession = false, allowTransient = false } = {}) {
+    const dot = document.getElementById('ind-license');
+    const txt = document.getElementById('txt-license');
+    try {
+      const res = await api.get('/license');
+      if (res?.error === 'session_required') {
+        if (!retriedSession && await recoverSession()) {
+          return checkLicense({ retriedSession: true });
+        }
+        setSessionRequired();
+        renderView();
+        return false;
+      }
+      if (res && res.valid) {
+        state.licenseStatus = res;
+        licenseValid = true;
+        licenseGate = true;
+        clearSessionRequired();
+        clearLicenseBlocking();
+        dot.classList.add('on');
+        txt.innerText = res.customer_name ? `已授权: ${res.customer_name}` : '已激活';
+        renderView();
+        return true;
+      } else if (res && res.activated && !res.valid) {
+        const errType = res.info?.error || '';
+        if (allowTransient && LICENSE_ACTIVATION_TRANSIENT_ERRORS.has(errType)) {
+          clearSessionRequired();
+          clearLicenseBlocking();
+          dot.classList.remove('on');
+          txt.innerText = '许可证确认中...';
+          renderView();
+          return null;
+        }
+        const errMsg = errType === 'machine_mismatch'
+          ? '机器指纹不匹配，请点击下方按钮重新激活'
+          : (res.info?.message || '许可证已过期');
+        setLicenseBlocking({
+          activated: true,
+          error: errType,
+          message: errMsg
+        });
+        dot.classList.remove('on');
+        txt.innerText = errMsg;
+        renderView();
+        return false;
+      } else {
+        setLicenseBlocking({
+          activated: Boolean(res?.activated),
+          error: res?.info?.error || '',
+          message: res?.info?.message || ''
+        });
+        dot.classList.remove('on');
+        txt.innerText = '未激活';
+        renderView();
+        return false;
+      }
+    } catch (e) {
+      // 网络错误时不阻塞使用（离线宽限）
+      dot.classList.remove('on');
+      txt.innerText = '验证中...';
+      return false;
+    }
+  }
+
+  async function waitForLicenseActivationConfirmation() {
+    const delays = [0, 600, 1200, 2000, 3000];
+    for (const delay of delays) {
+      if (delay) {
+        await sleepMs(delay);
+      }
+      const result = await checkLicense({ allowTransient: true });
+      if (result === true) {
+        return true;
+      }
+      if (result === false || state.sessionRequired) {
+        return false;
+      }
+    }
+    return checkLicense();
+  }
+
+  document.getElementById('btn-activate-license')?.addEventListener('click', async () => {
+    const input = document.getElementById('license-key-input');
+    const errEl = document.getElementById('license-error');
+    const sucEl = document.getElementById('license-success');
+    const btn = document.getElementById('btn-activate-license');
+    const key = input.value.trim();
+
+    errEl.style.display = 'none';
+    sucEl.style.display = 'none';
+
+    if (!key) {
+      errEl.innerText = '请输入许可证密钥';
+      errEl.style.display = 'block';
+      return;
+    }
+
+    btn.disabled = true;
+    btn.innerText = '激活中...';
+
+    const res = await api.post('/license/activate', { license_key: key });
+
+    if (res?.ok) {
+      sucEl.innerText = (res.message || '激活成功！') + ' 正在确认许可证状态...';
+      sucEl.style.display = 'block';
+      btn.innerText = '确认中...';
+      const confirmed = await waitForLicenseActivationConfirmation();
+      btn.disabled = false;
+      btn.innerText = '激活';
+      if (confirmed) {
+        showToast('许可证激活成功', 'success');
+      } else if (state.licenseBlocking) {
+        errEl.innerText = state.licenseStatus?.message || '许可证状态确认失败，请稍后重试';
+        errEl.style.display = 'block';
+        sucEl.style.display = 'none';
+      }
+    } else {
+      btn.disabled = false;
+      btn.innerText = '激活';
+      errEl.innerText = res?.message || res?.error || '激活失败，请检查密钥是否正确';
+      errEl.style.display = 'block';
+    }
+  });
+
+  // 回车键触发激活
+  document.getElementById('license-key-input')?.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') document.getElementById('btn-activate-license')?.click();
+  });
+
+  let licenseGate = false; // true = license valid, safe to poll business endpoints
+  let engineTimer = null;
+
+  function startEngine() {
+    const tick = async ({ forceLicenseCheck = false } = {}) => {
+      if (!state.updateCheckedOnce && !state.sessionRequired) {
+        checkForUpdates({ silent: true });
+      }
+      if (forceLicenseCheck || !licenseGate || state.licenseBlocking || state.sessionRequired) {
+        const valid = await checkLicense();
+        licenseGate = valid && !state.licenseBlocking && !state.sessionRequired;
+        if (!licenseGate) return;
+      }
+      const setupActive = shouldUseLightPolling();
+      await pollBackendData({ includeHistory: !setupActive && !lastHistoryPollAt, lightweight: setupActive });
+      if (!setupActive) {
+        await refreshHistoryData();
+      }
+    };
+
+    tick({ forceLicenseCheck: true });
+
+    if (engineTimer) {
+      clearInterval(engineTimer);
+    }
+    engineTimer = setInterval(() => {
+      tick({ forceLicenseCheck: state.licenseBlocking || state.sessionRequired || !licenseGate });
+    }, 3000);
+    setInterval(() => {
+      if (licenseGate && !state.licenseBlocking && !state.sessionRequired) {
+        refreshHistoryData();
+      }
+    }, HISTORY_POLL_INTERVAL_MS);
+  }
+
+  // 挂载
+  window.addEventListener('DOMContentLoaded', () => {
+    initSidebarResize();
+    document.getElementById('btn-update-check')?.addEventListener('click', () => checkForUpdates({ force: true }));
+    document.getElementById('btn-update-check-drawer')?.addEventListener('click', () => checkForUpdates({ force: true }));
+    document.getElementById('btn-update-download')?.addEventListener('click', downloadAvailableUpdate);
+    document.getElementById('btn-update-download-drawer')?.addEventListener('click', downloadAvailableUpdate);
+    document.getElementById('btn-update-reveal')?.addEventListener('click', () => installDownloadedUpdate());
+    document.getElementById('btn-update-reveal-drawer')?.addEventListener('click', () => installDownloadedUpdate());
+    document.getElementById('btn-mailbox-open-sidebar')?.addEventListener('click', () => setMailboxOpen(true));
+    document.getElementById('btn-mailbox-close')?.addEventListener('click', () => setMailboxOpen(false));
+    document.getElementById('mailbox-panel-backdrop')?.addEventListener('click', () => setMailboxOpen(false));
+    document.getElementById('btn-feedback-mailto')?.addEventListener('click', sendFeedback);
+    document.addEventListener('keydown', (event) => {
+      if (event.key === 'Escape' && state.mailboxOpen) setMailboxOpen(false);
+    });
+    loadPackageInfo();
+    renderUpdateWidget();
+    startEngine();
+  });
+
+  window.addEventListener('focus', () => {
+    runImmediateRefresh({ includeHistory: state.activeView === 'history' });
+  });
+
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) {
+      runImmediateRefresh({ includeHistory: state.activeView === 'history' });
+    }
+  });
+</script>
+
+</body>
+</html>

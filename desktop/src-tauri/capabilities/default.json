@@ -1,0 +1,15 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Main data-scientist window permissions",
+  "windows": ["main"],
+  "permissions": [
+    "core:event:allow-listen",
+    "core:event:allow-unlisten",
+    "allow-get-startup-snapshot",
+    "allow-mark-react-interactive",
+    "allow-open-legacy-console",
+    "allow-open-startup-log",
+    "allow-retry-startup-stage"
+  ]
+}

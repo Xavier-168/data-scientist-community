@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-open-legacy-console"
+description = "Enables the open_legacy_console command without any pre-configured scope."
+commands.allow = ["open_legacy_console"]
+
+[[permission]]
+identifier = "deny-open-legacy-console"
+description = "Denies the open_legacy_console command without any pre-configured scope."
+commands.deny = ["open_legacy_console"]

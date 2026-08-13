@@ -1,0 +1,38 @@
+name: 功能建议
+description: 提议社区范围内的改进
+title: "[Feature] "
+labels: ["enhancement", "needs-triage"]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: 问题与使用场景
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: 建议方案
+    validations:
+      required: true
+  - type: textarea
+    id: data_network
+    attributes:
+      label: 数据、网络与权限影响
+      description: 写明新增目的地、字段、凭据和默认行为；没有也请写“无”。
+    validations:
+      required: true
+  - type: textarea
+    id: license
+    attributes:
+      label: 第三方来源与许可证
+      description: 如涉及源码、字体、图片、模型或数据，请给出版本和许可。
+  - type: checkboxes
+    id: scope
+    attributes:
+      label: 范围确认
+      options:
+        - label: 建议不要求绕过平台访问控制、验证码或频率限制。
+          required: true
+        - label: 建议不包含 MCN 多账号、团队、白标、OEM、托管、SLA 或 HSI 私有能力。
+          required: true

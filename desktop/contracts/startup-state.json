@@ -1,0 +1,10 @@
+{
+  "phase": "core_checking",
+  "message": "正在检查核心服务",
+  "progress": 0.12,
+  "can_retry": false,
+  "core_ready": false,
+  "collector_ready": false,
+  "app_installed": false,
+  "error_code": null
+}

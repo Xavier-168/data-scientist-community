@@ -1,0 +1,10 @@
+[
+  "window_ready",
+  "core_checking",
+  "core_preparing",
+  "api_starting",
+  "api_ready",
+  "collector_preparing",
+  "ready",
+  "recoverable_error"
+]

@@ -1,0 +1,70 @@
+name: Community CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: community-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: macOS full test and privacy audit
+    runs-on: macos-14
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out source with full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Set up Node.js 22.14
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.14.0"
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            desktop/package-lock.json
+
+      - name: Set up Rust stable
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Install Python dependencies
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip
+          .venv/bin/python -m pip install -r requirements.txt
+
+      - name: Install Node and browser dependencies
+        run: |
+          npm ci
+          npm ci --prefix desktop
+          npx playwright install chromium
+
+      - name: Run complete test suite
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+          YIRENGONGIS_STATE_DIR: ${{ runner.temp }}/community-state
+        run: npm test
+
+      - name: Scan working tree and Git history
+        run: >-
+          .venv/bin/python scripts/public_audit_scan.py
+          --root .
+          --git-history
+          --fail-on low
