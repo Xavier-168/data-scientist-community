@@ -15,7 +15,7 @@ concurrency:
 
 jobs:
   test:
-    name: macOS full test and privacy audit
+    name: macOS portable suite and privacy audit
     runs-on: macos-14
     timeout-minutes: 60
 
@@ -66,12 +66,31 @@ jobs:
           npm run test:python
           npm run test:desktop:web
           npm run test:desktop:build
+          # GitHub-hosted macOS does not expose same-user child process
+          # environment markers consistently. Keep those process-ownership
+          # tests in the mandatory local `npm test` gate; run every portable
+          # Rust unit/integration test here without relabeling this as full.
           node scripts/run_rust_tool.mjs cargo test \
             --manifest-path desktop/src-tauri/Cargo.toml \
             --locked \
             --all-features \
+            --lib \
             -- \
             --skip 'sidecar::tests::'
+          node scripts/run_rust_tool.mjs cargo test \
+            --manifest-path desktop/src-tauri/Cargo.toml \
+            --locked \
+            --all-features \
+            --test install_integration
+          node scripts/run_rust_tool.mjs cargo test \
+            --manifest-path desktop/src-tauri/Cargo.toml \
+            --locked \
+            --all-features \
+            --test runtime_recovery \
+            -- \
+            --skip collector_failure_does_not_remove_core_or_api_ready_state \
+            --skip shutdown_cancels_slow_collector_without_waiting_for_full_delay \
+            --skip successful_retry_preserves_another_failed_lane
           node scripts/test_rust_tool_signal.mjs
           npm run test:desktop:smoke
 
