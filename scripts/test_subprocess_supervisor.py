@@ -77,19 +77,37 @@ class SubprocessSupervisorTests(unittest.TestCase):
 
     def test_heartbeat_runs_while_process_is_alive(self):
         calls = []
+        heartbeat_path = self.root / "heartbeat.txt"
+        code = (
+            "import pathlib,time\n"
+            f"path = pathlib.Path({str(heartbeat_path)!r})\n"
+            "deadline = time.monotonic() + 5\n"
+            "while time.monotonic() < deadline:\n"
+            " if path.exists() and len(path.read_text(encoding='utf-8').splitlines()) >= 2:\n"
+            "  break\n"
+            " time.sleep(0.01)\n"
+            "else:\n"
+            " raise SystemExit(2)\n"
+        )
+
+        def heartbeat():
+            calls.append(time.monotonic())
+            with heartbeat_path.open("a", encoding="utf-8") as handle:
+                handle.write("beat\n")
 
         result = run_supervised(
-            [sys.executable, "-c", "import time; print('start', flush=True); time.sleep(.15)"],
+            [sys.executable, "-c", code],
             env=os.environ.copy(),
             cwd=self.root,
             log_path=self.log_path,
-            inactivity_timeout=0.5,
-            heartbeat=lambda: calls.append(time.monotonic()),
+            inactivity_timeout=2,
+            heartbeat=heartbeat,
             heartbeat_interval=0.03,
             poll_interval=0.03,
         )
 
         self.assertEqual(result.outcome, "success")
+        self.assertEqual(result.returncode, 0)
         self.assertGreaterEqual(len(calls), 2)
 
 
