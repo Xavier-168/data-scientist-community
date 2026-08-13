@@ -59,6 +59,7 @@ jobs:
       - name: Run complete test suite
         env:
           PYTHONDONTWRITEBYTECODE: "1"
+          RUST_TEST_THREADS: "1"
           YIRENGONGIS_STATE_DIR: ${{ runner.temp }}/community-state
         run: npm test
 
