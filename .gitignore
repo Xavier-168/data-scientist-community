@@ -4,12 +4,13 @@
 !.env.example
 .auth/
 .playwright-browsers/
-.pytest_cache/
+.pytest_cache
 /.venv/
 __pycache__/
 *.log
 *.py[cod]
 *.so
+.signing-keys/
 build/
 /desktop/dist/
 /desktop/node_modules/
@@ -19,3 +20,6 @@ dist/
 downloads/
 node_modules/
 updates/
+
+# Windows 打包暂存区（build_windows_release.py 生成）
+/desktop/src-tauri/resources/

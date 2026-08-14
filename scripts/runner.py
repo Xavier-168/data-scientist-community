@@ -84,7 +84,17 @@ def _default_playwright_browsers_dir() -> str:
     bundled = os.path.join(BASE_DIR, "runtime", "playwright-browsers")
     if os.path.isdir(bundled):
         return bundled
-    return os.path.join(STATE_DIR, ".playwright-browsers")
+    state_browsers = os.path.join(STATE_DIR, ".playwright-browsers")
+    if os.path.isdir(state_browsers):
+        return state_browsers
+    if os.name == "nt":
+        # Playwright 每用户默认注册表（npx playwright install 的默认落点）。
+        local_app_data = str(os.environ.get("LOCALAPPDATA", "") or "").strip()
+        if local_app_data:
+            default_registry = os.path.join(local_app_data, "ms-playwright")
+            if os.path.isdir(default_registry):
+                return default_registry
+    return state_browsers
 
 RUNNER_HOST = os.environ.get("YIRENGONGIS_RUNNER_HOST", "127.0.0.1")
 RUNNER_PORT = int(os.environ.get("YIRENGONGIS_RUNNER_PORT", "8811"))
@@ -7902,7 +7912,12 @@ def _bind_runner_server(host: str, preferred_port: int, handler, *, allow_fallba
     try:
         return ThreadingHTTPServer((host, int(preferred_port)), handler)
     except OSError as exc:
-        address_in_use = exc.errno == errno.EADDRINUSE or getattr(exc, "winerror", None) == 10048
+        address_in_use = exc.errno == errno.EADDRINUSE or getattr(exc, "winerror", None) in (
+            # 10048 = WSAEADDRINUSE；Windows 的 SO_REUSEADDR 语义下，
+            # 绑定已被监听的端口也可能表现为 10013 (WSAEACCES)。
+            10048,
+            10013,
+        )
         if not allow_fallback or int(preferred_port) == 0 or not address_in_use:
             raise
     return ThreadingHTTPServer((host, 0), handler)
@@ -7925,22 +7940,13 @@ def _runner_ready_frame(server) -> str:
 
 
 def _runner_process_command(pid: int) -> str:
-    import subprocess as _sp
-    try:
-        result = _sp.run(
-            ["ps", "-p", str(pid), "-o", "command="],
-            capture_output=True,
-            text=True,
-            timeout=3,
-        )
-    except Exception:
-        return ""
-    return str(result.stdout or "").strip()
+    from core.process import process_command
+    return process_command(pid)
 
 
 def _is_current_product_runner_command(command: str) -> bool:
-    text = str(command or "")
-    expected = os.path.realpath(BASE_DIR)
+    text = str(command or "").replace("\\", "/")
+    expected = os.path.realpath(BASE_DIR).replace("\\", "/")
     return bool(
         expected in text
         and any(marker in text for marker in ("/scripts/_run.py", "/scripts/runner.py", "runner.cpython-"))
@@ -7952,43 +7958,18 @@ def _kill_stale_runner_processes():
 
     Only targets runner/_run.py processes that hold our port, to avoid
     killing unrelated processes.  Gives them 2 s to exit gracefully
-    before SIGKILL.
+    before force kill (Windows: taskkill /T /F on the tree).
     """
-    import subprocess as _sp
-    try:
-        result = _sp.run(
-            ["lsof", "-ti", f":{RUNNER_PORT}", "-sTCP:LISTEN"],
-            capture_output=True, text=True, timeout=3,
-        )
-        pids = [p.strip() for p in (result.stdout or "").splitlines() if p.strip()]
-    except Exception:
-        return
+    from core.process import port_listener_pids, terminate_pid_tree
+
+    pids = port_listener_pids(RUNNER_PORT)
     my_pid = os.getpid()
-    matched_pids = []
-    for pid_str in pids:
-        try:
-            pid = int(pid_str)
-        except ValueError:
-            continue
+    for pid in pids:
         if pid == my_pid:
             continue
         if not _is_current_product_runner_command(_runner_process_command(pid)):
             continue
-        matched_pids.append(pid)
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except OSError:
-            continue
-    if matched_pids:
-        time.sleep(2)
-        for pid in matched_pids:
-            if not _is_current_product_runner_command(_runner_process_command(pid)):
-                continue
-            try:
-                os.kill(pid, 0)  # still alive?
-                os.kill(pid, signal.SIGKILL)
-            except OSError:
-                pass
+        terminate_pid_tree(pid)
 
 
 def _should_cleanup_stale_runners() -> bool:

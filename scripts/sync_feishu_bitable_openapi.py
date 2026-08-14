@@ -12,6 +12,7 @@ import ssl
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -72,12 +73,45 @@ CLI_FIELD_VISIBILITY_RETRY_DELAYS = (0.5, 1.0, 2.0, 4.0)
 
 
 class SyncTimeoutError(TimeoutError):
-    """signal.SIGALRM 触发的单表同步超时"""
+    """单表同步超时（POSIX 由 SIGALRM 触发，Windows 由看门狗线程触发）"""
     pass
 
 
 def _alarm_handler(signum, frame):
     raise SyncTimeoutError("同步超时")
+
+
+def _run_sync_with_timeout(fn, timeout_seconds):
+    """表级同步看门狗。
+
+    POSIX 保留原 SIGALRM 机制（可在阻塞的系统调用中同步打断）；
+    Windows 无 SIGALRM，改为工作线程 + join 超时：超时后主流程立即
+    以 SyncTimeoutError 中止，工作线程作为 daemon 随进程退出。
+    """
+    if os.name != "nt":
+        signal.signal(signal.SIGALRM, _alarm_handler)
+        signal.alarm(timeout_seconds)
+        try:
+            return fn()
+        finally:
+            signal.alarm(0)
+
+    outcome = {}
+
+    def _worker():
+        try:
+            outcome["result"] = fn()
+        except BaseException as exc:  # noqa: BLE001 - 原样转发到调用线程
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=_worker, name="feishu-sync-watchdog", daemon=True)
+    worker.start()
+    worker.join(timeout_seconds)
+    if worker.is_alive():
+        raise SyncTimeoutError(f"同步超时（>{timeout_seconds}s）")
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome.get("result")
 
 
 def load_env_file(path: Path):
@@ -98,7 +132,12 @@ def build_ssl_context():
 
 
 def resolve_npx_bin() -> str:
-    return shutil.which("npx") or ""
+    names = ("npx.cmd", "npx.exe", "npx") if os.name == "nt" else ("npx",)
+    for name in names:
+        found = shutil.which(name)
+        if found:
+            return found
+    return ""
 
 
 def _sort_existing_paths(paths: list[str]) -> list[str]:
@@ -1453,22 +1492,22 @@ def sync_all_tables(
     for table_definition in table_definitions:
         table_name = table_definition["name"]
         rows = tables.get(table_name, [])
-        signal.signal(signal.SIGALRM, _alarm_handler)
-        signal.alarm(TABLE_SYNC_TIMEOUT)
         try:
-            result = sync_table(
-                app_token,
-                table_definition,
-                rows,
-                token,
-                table_map,
-                use_cli=use_cli,
-                checkpoint=checkpoint,
-                checkpoint_path=checkpoint_path,
-                strict_schema=bool(strict_schema),
+            result = _run_sync_with_timeout(
+                lambda definition=table_definition: sync_table(
+                    app_token,
+                    definition,
+                    rows,
+                    token,
+                    table_map,
+                    use_cli=use_cli,
+                    checkpoint=checkpoint,
+                    checkpoint_path=checkpoint_path,
+                    strict_schema=bool(strict_schema),
+                ),
+                TABLE_SYNC_TIMEOUT,
             )
         except SyncTimeoutError:
-            signal.alarm(0)
             print(
                 f"[timeout] {table_name}: sync exceeded {TABLE_SYNC_TIMEOUT}s",
                 file=sys.stderr,
@@ -1481,11 +1520,6 @@ def sync_all_tables(
                 "warnings": warnings,
                 "checkpoint_kept": bool(checkpoint_path and checkpoint_path.exists()),
             }
-        except Exception:
-            signal.alarm(0)
-            raise
-        finally:
-            signal.alarm(0)
         results.append(result)
         warnings.extend(result.get("warnings") or [])
         print(

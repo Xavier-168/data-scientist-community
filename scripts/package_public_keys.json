@@ -4,6 +4,10 @@
     {
       "key_id": "pkg-primary-20260407",
       "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAO/EMd2H60FiLYic2V9aQv+un/9MuHzjZ6aiUiHox0aU=\n-----END PUBLIC KEY-----\n"
+    },
+    {
+      "key_id": "pkg-win-20260814",
+      "public_key_pem": "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAaEAvQ8Tj84aYV1f1u/3J2cor5EKjmpD1aD+hXEpCwSQ=\n-----END PUBLIC KEY-----\n"
     }
   ]
 }

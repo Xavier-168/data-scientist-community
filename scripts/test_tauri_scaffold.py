@@ -145,7 +145,8 @@ class TauriScaffoldTests(unittest.TestCase):
         self.assertEqual(config["mainBinaryName"], "data-scientist")
         self.assertEqual(config["build"]["devUrl"], "http://127.0.0.1:1420")
         self.assertEqual(config["build"]["frontendDist"], "../dist")
-        self.assertEqual(config["bundle"]["targets"], ["app"])
+        # macOS .app 与 Windows NSIS 双目标（各平台构建器只认自己的 target）
+        self.assertEqual(config["bundle"]["targets"], ["app", "nsis"])
         self.assertEqual(config["app"]["security"]["capabilities"], ["default"])
         self.assertNotIn("https://", str(config["build"]))
         self.assertTrue(window["visible"])

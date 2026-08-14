@@ -335,6 +335,33 @@ class LicenseManager:
     # --------------------------------------------------------
     # 机器指纹
     # --------------------------------------------------------
+    def _windows_wmi_value(self, wmi_class: str) -> str:
+        """读取 Windows 硬件序列号。
+
+        PowerShell CIM 优先（Windows 11 起 wmic 已被移除），wmic 兜底
+        （两者底层是同一 WMI 提供商，序列号取值一致，不影响既有指纹）。
+        """
+        ps_command = f"(Get-CimInstance {wmi_class}).SerialNumber"
+        commands = (
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps_command],
+            ["wmic", wmi_class.split("_")[-1].lower(), "get", "serialnumber"],
+        )
+        popen_kwargs = {"text": True, "timeout": 5, "stderr": subprocess.DEVNULL}
+        if os.name == "nt":
+            popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        for command in commands:
+            try:
+                out = subprocess.check_output(command, **popen_kwargs)
+            except Exception:
+                continue
+            lines = [line.strip() for line in out.splitlines() if line.strip()]
+            if not lines:
+                continue
+            value = lines[-1]
+            if value and value.lower() != "serialnumber":
+                return value
+        return ""
+
     def get_machine_id(self):
         """生成当前机器的唯一标识（不可逆哈希）"""
         raw_parts = []
@@ -356,22 +383,10 @@ class LicenseManager:
 
         elif system == "Windows":
             # Windows: 使用主板序列号 + BIOS序列号
-            try:
-                out = subprocess.check_output(
-                    ["wmic", "baseboard", "get", "serialnumber"],
-                    text=True, timeout=5
-                )
-                raw_parts.append(out.strip().split("\n")[-1].strip())
-            except Exception:
-                pass
-            try:
-                out = subprocess.check_output(
-                    ["wmic", "bios", "get", "serialnumber"],
-                    text=True, timeout=5
-                )
-                raw_parts.append(out.strip().split("\n")[-1].strip())
-            except Exception:
-                pass
+            for wmi_class in ("Win32_BaseBoard", "Win32_BIOS"):
+                serial = self._windows_wmi_value(wmi_class)
+                if serial:
+                    raw_parts.append(serial)
 
         # 后备方案: MAC 地址
         if not raw_parts:

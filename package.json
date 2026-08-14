@@ -9,15 +9,15 @@
   },
   "scripts": {
     "test:frontend": "node scripts/test_frontend_security.js && node scripts/test_frontend_request_recovery.js && node scripts/test_progress_workflow_guards.js --reliability-only && node scripts/test_collection_journey_progress.js && node scripts/test_progress_dashboard_copy.js --classification-only && node scripts/test_loading_screen.js && node scripts/test_browser_auth_utils.mjs && node scripts/test_auth_health_transient_pages.mjs && node scripts/test_xiaohongshu_auth_stability.mjs && node scripts/test_kuaishou_export_download.mjs && node scripts/test_bilibili_login_guards.js && node scripts/test_bilibili_export_integrity.js && node scripts/test_douyin_result_reuse.js && node scripts/test_monitor_session_guard.js",
-    "test:python": ".venv/bin/python -m unittest discover -s scripts -p 'test_*.py'",
+    "test:python": "node scripts/run_python.mjs -m unittest discover -s scripts -p \"test_*.py\"",
     "test:desktop:web": "npm --prefix desktop test",
     "test:desktop:build": "npm --prefix desktop run build:web",
     "test:desktop:rust": "npm --prefix desktop run test:rust",
     "test:desktop:smoke": "node scripts/test_tauri_startup_ui.mjs",
-    "test:public": ".venv/bin/python scripts/test_public_release.py",
+    "test:public": "node scripts/run_python.mjs scripts/test_public_release.py",
     "test": "npm run test:public && npm run test:frontend && npm run test:python && npm run test:desktop:web && npm run test:desktop:build && npm run test:desktop:rust && npm run test:desktop:smoke",
-    "build:staging": ".venv/bin/python scripts/build_community_staging.py",
-    "sbom": ".venv/bin/python scripts/generate_sbom.py --output SBOM.spdx.json"
+    "build:staging": "node scripts/run_python.mjs scripts/build_community_staging.py",
+    "sbom": "node scripts/run_python.mjs scripts/generate_sbom.py --output SBOM.spdx.json"
   },
   "dependencies": {
     "@larksuite/cli": "1.0.43",

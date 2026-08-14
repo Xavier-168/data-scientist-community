@@ -147,6 +147,14 @@ def _find_playwright_chromium_in_tree(browser_root: Path) -> Path | None:
     return None
 
 
+def _playwright_default_registry_root() -> Path | None:
+    """Playwright 自身的每用户默认注册表目录（Windows: %LOCALAPPDATA%\\ms-playwright）。"""
+    if os.name != "nt":
+        return None
+    local_app_data = os.environ.get("LOCALAPPDATA", "").strip()
+    return Path(local_app_data) / "ms-playwright" if local_app_data else None
+
+
 def _candidate_playwright_browser_roots(root_dir: Path) -> list[Path]:
     roots: list[Path] = []
     app_payload = os.environ.get("YIRENGONGIS_APP_PAYLOAD_DIR")
@@ -154,6 +162,9 @@ def _candidate_playwright_browser_roots(root_dir: Path) -> list[Path]:
         roots.append(Path(app_payload) / "runtime" / "playwright-browsers")
     roots.append(playwright_browser_root(root_dir))
     roots.append(root_dir / "runtime" / "playwright-browsers")
+    default_registry = _playwright_default_registry_root()
+    if default_registry is not None:
+        roots.append(default_registry)
 
     unique_roots: list[Path] = []
     seen: set[str] = set()
@@ -379,8 +390,13 @@ def ensure_playwright_browsers(root_dir: Path, channel: str) -> None:
     if browser_executable_is_usable(managed_chromium):
         return
     if managed_chromium:
+        if sys.platform == "darwin":
+            raise RuntimeError(
+                "Bundled Chrome runtime exists but macOS blocked it. Restart macOS or reinstall Google Chrome."
+            )
         raise RuntimeError(
-            "Bundled Chrome runtime exists but macOS blocked it. Restart macOS or reinstall Google Chrome."
+            "Bundled Chrome runtime exists but failed to launch. "
+            "Reinstall Google Chrome or replace the bundled Chromium."
         )
     bundled_browser_root = root_dir / "runtime" / "playwright-browsers"
     if bundled_browser_root.exists():
@@ -515,10 +531,17 @@ def safe_open_browser(url: str, root_dir: Path, channel: str) -> bool:
 
 
 def print_browser_unavailable_message() -> None:
-    msg = (
-        "Chrome/Chromium 无法启动，macOS 安全策略正在拦截浏览器进程。\n"
-        "请重启 Mac 后再打开数据科学家；如果仍失败，请重新安装 Google Chrome。"
-    )
+    if sys.platform == "darwin":
+        msg = (
+            "Chrome/Chromium 无法启动，macOS 安全策略正在拦截浏览器进程。\n"
+            "请重启 Mac 后再打开数据科学家；如果仍失败，请重新安装 Google Chrome。"
+        )
+    else:
+        msg = (
+            "Chrome/Chromium 无法启动，浏览器可执行文件探测失败。\n"
+            "请重新安装 Google Chrome 后再打开数据科学家；也可以在 start 脚本"
+            "追加 --no-open 参数改为手动访问 http://127.0.0.1:8811/monitor。"
+        )
     print(f"[error] {msg}", file=sys.stderr)
     print(f"[user-message] {msg}")
 
@@ -598,50 +621,21 @@ def runner_build_matches(current: dict[str, str], running: dict[str, str]) -> bo
 
 
 def listener_pids_for_port(port: int) -> list[int]:
-    if sys.platform != "darwin":
-        return []
-    lsof = find_cmd("lsof")
-    if not lsof:
-        return []
-    try:
-        result = subprocess.run(
-            [lsof, "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            check=False,
-        )
-    except Exception:
-        return []
-    pids: list[int] = []
-    for line in result.stdout.splitlines():
-        try:
-            pid = int(line.strip())
-        except ValueError:
-            continue
-        if pid > 0 and pid != os.getpid():
-            pids.append(pid)
-    return sorted(set(pids))
+    from core.process import port_listener_pids
+
+    return [pid for pid in port_listener_pids(port) if pid > 0 and pid != os.getpid()]
 
 
 def process_command(pid: int) -> str:
-    try:
-        result = subprocess.run(
-            ["ps", "-p", str(pid), "-o", "command="],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            check=False,
-        )
-    except Exception:
-        return ""
-    return result.stdout.strip()
+    from core.process import process_command as _query_command
+
+    return _query_command(pid)
 
 
 def is_expected_runner_command(command: str, expected_base_dir: Path | str) -> bool:
-    raw_command = str(command or "")
-    expected = str(Path(expected_base_dir).expanduser())
-    resolved = os.path.realpath(expected)
+    raw_command = str(command or "").replace("\\", "/")
+    expected = str(Path(expected_base_dir).expanduser()).replace("\\", "/")
+    resolved = os.path.realpath(expected).replace("\\", "/")
     path_matches = expected in raw_command or resolved in raw_command
     runner_matches = any(
         marker in raw_command
@@ -656,6 +650,8 @@ def terminate_listener_pids(
     reason: str,
     expected_base_dir: Path | str,
 ) -> bool:
+    from core.process import terminate_pid_tree
+
     pids = listener_pids_for_port(port)
     if not pids:
         return False
@@ -667,32 +663,8 @@ def terminate_listener_pids(
             continue
         matching_pids.append(pid)
         print(f"[warn] stopping stale runner pid={pid} port={port} reason={reason} cmd={command}")
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except ProcessLookupError:
-            continue
-        except Exception as exc:
-            print(f"[warn] failed to terminate pid={pid}: {exc}")
-    if not matching_pids:
-        return False
-    deadline = time.time() + 4
-    while time.time() < deadline:
-        current = set(listener_pids_for_port(port))
-        if not any(pid in current for pid in matching_pids):
-            return True
-        time.sleep(0.2)
-    current = set(listener_pids_for_port(port))
-    for pid in matching_pids:
-        if pid not in current or not is_expected_runner_command(process_command(pid), expected_base_dir):
-            continue
-        print(f"[warn] force stopping stale runner pid={pid} port={port}")
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except Exception:
-            pass
-    time.sleep(0.3)
-    remaining = set(listener_pids_for_port(port))
-    return not any(pid in remaining for pid in matching_pids)
+        terminate_pid_tree(pid)
+    return bool(matching_pids)
 
 
 def find_available_port(host: str, start_port: int, attempts: int = 10) -> int:

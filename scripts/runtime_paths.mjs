@@ -15,6 +15,12 @@ export function resolveStateDir({
 } = {}) {
   const explicit = String(env.YIRENGONGIS_STATE_DIR ?? '').trim();
   if (explicit) return path.resolve(explicit);
+  if (platform === 'win32') {
+    // 与 Python 侧 core/paths.py 保持一致：Windows 状态默认放
+    // %APPDATA%\数据科学家 Community，不落在源码/安装目录。
+    const appData = env.APPDATA || path.join(homeDir, 'AppData', 'Roaming');
+    return path.join(appData, communityEdition ? '数据科学家 Community' : '数据科学家');
+  }
   if (platform !== 'darwin') return path.resolve(projectRoot);
   const appName = communityEdition ? '数据科学家 Community' : '数据科学家';
   return path.join(homeDir, 'Library', 'Application Support', appName);

@@ -24,11 +24,14 @@ import package_identity
 
 class UpdateMetadataSecurityTests(unittest.TestCase):
     def setUp(self):
+        # 平台身份跟随被测模块的动态值，Windows 上验证同样的安全属性
+        # （平台/架构不匹配即拒绝），而不是硬编码 mac/arm64。
+        self.other_arch = "arm64" if update_manager.UPDATE_ARCH == "x86_64" else "x86_64"
         self.release = {
-            "package_id": "data-scientist-community-mac-arm64",
+            "package_id": update_manager.DEFAULT_PACKAGE_ID,
             "version": "20260710",
-            "platform": "mac",
-            "arch": "arm64",
+            "platform": update_manager.UPDATE_PLATFORM,
+            "arch": update_manager.UPDATE_ARCH,
             "download_url": "https://downloads.example.test/yirengongis-20260710.dmg",
             "sha256": "a" * 64,
             "size_bytes": 1024,
@@ -46,13 +49,13 @@ class UpdateMetadataSecurityTests(unittest.TestCase):
         with self.assertRaisesRegex(update_manager.UpdateValidationError, "package_id_mismatch"):
             update_manager.validate_release(
                 {**self.release, "package_id": "other-package"},
-                expected_package_id="data-scientist-community-mac-arm64",
-                expected_arch="arm64",
+                expected_package_id=update_manager.DEFAULT_PACKAGE_ID,
+                expected_arch=update_manager.UPDATE_ARCH,
             )
 
     def test_release_requires_arm64_mac_and_date_version(self):
         with self.assertRaisesRegex(update_manager.UpdateValidationError, "platform_arch_mismatch"):
-            update_manager.validate_release({**self.release, "arch": "x86_64"})
+            update_manager.validate_release({**self.release, "arch": self.other_arch})
         with self.assertRaisesRegex(update_manager.UpdateValidationError, "invalid_build_version"):
             update_manager.validate_release({**self.release, "version": "1.0.7"})
         with self.assertRaisesRegex(update_manager.UpdateValidationError, "invalid_build_version"):
@@ -127,6 +130,10 @@ class UpdateMetadataSecurityTests(unittest.TestCase):
         self.assertTrue(normalized["update_available"])
 
 
+@unittest.skipIf(
+    os.name == "nt",
+    "macOS 安装事务（symlink/flock/codesign）仅在 POSIX 实现，Windows 由 NSIS 承担安装",
+)
 class UpdateReplacementSecurityTests(unittest.TestCase):
     def test_tauri_resource_layout_is_accepted_by_shared_update_validator(self):
         with tempfile.TemporaryDirectory() as temp_dir:
