@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import signal
 import subprocess
@@ -49,6 +50,26 @@ def _progress_mtime(path: str | Path | None) -> int | None:
         return Path(path).stat().st_mtime_ns
     except OSError:
         return None
+
+
+def _terminal_progress_status(path: str | Path | None) -> str:
+    """Return an explicit business-terminal progress status, if present.
+
+    Collectors write their final artifact before switching the progress file to
+    ``completed``/``failed``.  Browser/inspector cleanup can nevertheless keep
+    the wrapper process alive, so the supervisor treats this persisted state as
+    the authoritative end of the collection job after a short cleanup grace.
+    """
+    if not path:
+        return ""
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    status = str(payload.get("status") or "").strip().lower()
+    return status if status in {"completed", "failed"} else ""
 
 
 def _start_process(
@@ -145,6 +166,7 @@ def run_supervised(
     heartbeat_interval: float = 15,
     poll_interval: float = 0.25,
     terminate_grace_seconds: float = 2,
+    terminal_progress_grace_seconds: float = 5,
     tail_lines: int = 400,
 ) -> SupervisedResult:
     started = time.monotonic()
@@ -160,7 +182,10 @@ def run_supervised(
         requires_user_session=requires_user_session,
     )
     outcome = "success"
+    terminal_status = ""
+    terminal_observed_at: float | None = None
     last_progress_mtime = _progress_mtime(progress_path)
+    progress_changed_since_start = False
     next_heartbeat = time.monotonic()
     log_lock = threading.Lock()
 
@@ -203,8 +228,37 @@ def run_supervised(
             current_progress_mtime = _progress_mtime(progress_path)
             if current_progress_mtime is not None and current_progress_mtime != last_progress_mtime:
                 last_progress_mtime = current_progress_mtime
+                progress_changed_since_start = True
                 activity.touch()
             now = time.monotonic()
+            current_terminal_status = (
+                _terminal_progress_status(progress_path) if progress_changed_since_start else ""
+            )
+            if current_terminal_status and not terminal_status:
+                terminal_status = current_terminal_status
+                terminal_observed_at = now
+                with log_lock:
+                    log_handle.write(
+                        "[supervisor] terminal_progress "
+                        f"status={terminal_status} grace_seconds={float(terminal_progress_grace_seconds):.3f}\n"
+                    )
+                    log_handle.flush()
+            if (
+                terminal_status
+                and terminal_observed_at is not None
+                and now - terminal_observed_at >= max(float(terminal_progress_grace_seconds), 0.0)
+            ):
+                with log_lock:
+                    log_handle.write(
+                        f"[supervisor] terminating_after_terminal status={terminal_status}\n"
+                    )
+                    log_handle.flush()
+                _terminate_process(
+                    proc,
+                    requires_user_session=requires_user_session,
+                    grace_seconds=terminate_grace_seconds,
+                )
+                break
             if heartbeat and now >= next_heartbeat:
                 try:
                     heartbeat()
@@ -234,8 +288,20 @@ def run_supervised(
             returncode = proc.wait(timeout=1)
         for thread in threads:
             thread.join(timeout=1)
+        final_progress_mtime = _progress_mtime(progress_path)
+        if final_progress_mtime is not None and final_progress_mtime != last_progress_mtime:
+            progress_changed_since_start = True
+        if not terminal_status and progress_changed_since_start:
+            terminal_status = _terminal_progress_status(progress_path)
         if outcome != "stalled":
-            outcome = "success" if returncode == 0 else "failed"
+            if terminal_status == "completed":
+                returncode = 0
+                outcome = "success"
+            elif terminal_status == "failed":
+                returncode = returncode if returncode != 0 else 1
+                outcome = "failed"
+            else:
+                outcome = "success" if returncode == 0 else "failed"
         log_handle.write(f"[supervisor] finished returncode={returncode} outcome={outcome}\n")
         log_handle.flush()
 

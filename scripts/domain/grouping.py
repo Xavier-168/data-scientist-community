@@ -14,7 +14,7 @@ from typing import Dict, List, Optional
 from platform_source_rows import normalize_title
 
 # 标题相似度阈值:达到则判定为同一作品的多个平台版本
-TITLE_SIMILARITY_THRESHOLD = 0.70
+TITLE_SIMILARITY_THRESHOLD = 0.40
 # episode 正则的结尾兜底(允许结尾标点/数字/空白)
 _EPISODE_TAIL = r"(?:\s+|[，,。.!！?？:：\s【】《》「」『』<>〈〉\d]|$)"
 
