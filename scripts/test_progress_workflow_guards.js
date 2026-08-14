@@ -1188,6 +1188,17 @@ async function testAuthRequiredStateDoesNotPretendToBeCompleted() {
   });
 }
 
+async function testQueuedPlatformIsNotPresentedAsActivelyCollecting() {
+  assert(
+    MONITOR_HTML.includes("pData.ui_status === 'queued'"),
+    "dashboard should handle queued platform state explicitly"
+  );
+  assert(
+    MONITOR_HTML.includes('排队等待...</span>'),
+    "queued platform should display a queue badge instead of the active collection badge"
+  );
+}
+
 async function testFeishuOnlyRunsFallbackToPlatformsWhenPlatformResultsAreEmpty() {
   const scenario = buildScenario({
     configSummary: {
@@ -1260,6 +1271,7 @@ async function main() {
   await testOfflineStateAppearsWithinSecondsWhenProgressEndpointHangs();
   await testNoDataCopyUsesWuShuJuInsteadOfZeroCountCopy();
   await testAuthRequiredStateDoesNotPretendToBeCompleted();
+  await testQueuedPlatformIsNotPresentedAsActivelyCollecting();
   await testFeishuOnlyRunsFallbackToPlatformsWhenPlatformResultsAreEmpty();
 }
 
@@ -1272,6 +1284,8 @@ const selectedRun = process.argv.includes("--reliability-only")
   ? runReliabilityGuards
   : process.argv.includes("--platform-write-only")
   ? testPlatformWritesPreserveLatestSnapshotWhenResponsesReverse
+  : process.argv.includes("--queued-only")
+  ? testQueuedPlatformIsNotPresentedAsActivelyCollecting
   : (process.argv.includes("--onboarding-auth-only")
     ? testWizardRequiresEverySelectedPlatformToBeAuthorized
     : main);

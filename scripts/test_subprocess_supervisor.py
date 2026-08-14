@@ -110,6 +110,98 @@ class SubprocessSupervisorTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0)
         self.assertGreaterEqual(len(calls), 2)
 
+    def test_completed_progress_releases_slot_and_kills_lingering_process_group(self):
+        marker_path = self.root / "should-not-exist.txt"
+        code = (
+            "import json,pathlib,time\n"
+            f"progress = pathlib.Path({str(self.progress_path)!r})\n"
+            f"marker = pathlib.Path({str(marker_path)!r})\n"
+            "progress.write_text(json.dumps({'status':'completed'}), encoding='utf-8')\n"
+            "time.sleep(5)\n"
+            "marker.write_text('orphaned', encoding='utf-8')\n"
+        )
+        started = time.monotonic()
+
+        result = run_supervised(
+            [sys.executable, "-c", code],
+            env=os.environ.copy(),
+            cwd=self.root,
+            log_path=self.log_path,
+            progress_path=self.progress_path,
+            inactivity_timeout=10,
+            terminal_progress_grace_seconds=0.1,
+            poll_interval=0.02,
+        )
+
+        self.assertEqual(result.outcome, "success")
+        self.assertEqual(result.returncode, 0)
+        self.assertLess(time.monotonic() - started, 2)
+        time.sleep(0.3)
+        self.assertFalse(marker_path.exists())
+        self.assertIn("terminal_progress status=completed", self.log_path.read_text(encoding="utf-8"))
+
+    def test_failed_progress_releases_slot_as_failed(self):
+        code = (
+            "import json,pathlib,time\n"
+            f"progress = pathlib.Path({str(self.progress_path)!r})\n"
+            "progress.write_text(json.dumps({'status':'failed'}), encoding='utf-8')\n"
+            "time.sleep(5)\n"
+        )
+
+        result = run_supervised(
+            [sys.executable, "-c", code],
+            env=os.environ.copy(),
+            cwd=self.root,
+            log_path=self.log_path,
+            progress_path=self.progress_path,
+            inactivity_timeout=10,
+            terminal_progress_grace_seconds=0.1,
+            poll_interval=0.02,
+        )
+
+        self.assertEqual(result.outcome, "failed")
+        self.assertNotEqual(result.returncode, 0)
+
+    def test_preexisting_completed_progress_does_not_end_new_process(self):
+        self.progress_path.write_text('{"status":"completed"}', encoding="utf-8")
+        started = time.monotonic()
+
+        result = run_supervised(
+            [sys.executable, "-c", "import time; time.sleep(0.35)"],
+            env=os.environ.copy(),
+            cwd=self.root,
+            log_path=self.log_path,
+            progress_path=self.progress_path,
+            inactivity_timeout=2,
+            terminal_progress_grace_seconds=0.01,
+            poll_interval=0.02,
+        )
+
+        self.assertEqual(result.outcome, "success")
+        self.assertEqual(result.returncode, 0)
+        self.assertGreaterEqual(time.monotonic() - started, 0.3)
+
+    def test_completed_progress_is_authoritative_when_cleanup_exits_nonzero(self):
+        code = (
+            "import json,pathlib\n"
+            f"progress = pathlib.Path({str(self.progress_path)!r})\n"
+            "progress.write_text(json.dumps({'status':'completed'}), encoding='utf-8')\n"
+            "raise SystemExit(7)\n"
+        )
+
+        result = run_supervised(
+            [sys.executable, "-c", code],
+            env=os.environ.copy(),
+            cwd=self.root,
+            log_path=self.log_path,
+            progress_path=self.progress_path,
+            inactivity_timeout=2,
+            poll_interval=0.02,
+        )
+
+        self.assertEqual(result.outcome, "success")
+        self.assertEqual(result.returncode, 0)
+
 
 if __name__ == "__main__":
     unittest.main()

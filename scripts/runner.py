@@ -1390,6 +1390,15 @@ _SUPERVISION_SECRET_ENV_KEYS = frozenset(
         "YIRENGONGIS_SUPERVISED_BY_TAURI",
         "YIRENGONGIS_SIDECAR_INSTANCE_ID",
         "YIRENGONGIS_RUNNER_READY_NONCE",
+        # Desktop/IDE parent processes may export Node inspector hooks.  A
+        # collector inheriting them can print "Waiting for the debugger to
+        # disconnect" and keep its queue slot after business completion.
+        "NODE_OPTIONS",
+        "NODE_INSPECT",
+        "NODE_DEBUG",
+        "VSCODE_INSPECTOR_OPTIONS",
+        "NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S",
+        "NODE_REPL_TRUSTED_CODE_PATHS",
     }
 )
 
@@ -2107,6 +2116,8 @@ def _ui_status(platform_id: str, progress: dict) -> str:
     if _is_stale_running_progress(progress, platform_id):
         return "auth_required" if auth_status in {"unauthorized", "expired", "needs_auth"} else "idle"
 
+    if status == "running" and phase == "queued":
+        return "queued"
     if status == "running" and phase not in {"done", "failed"}:
         return "running"
     if auth_status in {"unauthorized", "expired", "needs_auth"}:
@@ -5799,7 +5810,7 @@ class Handler(BaseHTTPRequestHandler):
         platform_ids = []
         for platform_id, progress_path in _resolve_requested_run_targets("/run_all", query):
             platform_ids.append(platform_id)
-            _prime_platform_progress(platform_id, progress_path, phase="starting", message="准备启动同步任务")
+            _prime_platform_progress(platform_id, progress_path, phase="queued", message="等待采集槽位")
         return platform_ids
 
     def _finalize_run_all_worker_failure(self, query, started_at: str, start: float, error_message: str) -> None:

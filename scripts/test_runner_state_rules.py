@@ -219,6 +219,21 @@ class BrowserResolutionTests(unittest.TestCase):
 
 
 class RunnerSubprocessTests(unittest.TestCase):
+    def test_supervision_env_removes_node_debug_hooks(self):
+        scrubbed = runner._scrub_supervision_env(
+            {
+                "PATH": "/usr/bin",
+                "NODE_OPTIONS": "--require inspector-hook.js",
+                "NODE_INSPECT": "1",
+                "NODE_DEBUG": "module",
+                "VSCODE_INSPECTOR_OPTIONS": "{}",
+                "NODE_REPL_TRUSTED_BROWSER_CLIENT_SHA256S": "secret",
+                "NODE_REPL_TRUSTED_CODE_PATHS": "/tmp/hook",
+            }
+        )
+
+        self.assertEqual(scrubbed, {"PATH": "/usr/bin"})
+
     def test_platform_script_uses_activity_supervisor_and_run_log(self):
         handler = runner.Handler.__new__(runner.Handler)
         supervised_result = SupervisedResult(
@@ -701,6 +716,25 @@ class RunnerArtifactIntegrationTests(unittest.TestCase):
 
 
 class RunnerRunAllSafetyTests(unittest.TestCase):
+    def test_run_all_primes_waiting_platforms_as_queued(self):
+        handler = runner.Handler.__new__(runner.Handler)
+        targets = [
+            ("douyin", "/tmp/douyin-progress.json"),
+            ("bilibili", "/tmp/bili-progress.json"),
+        ]
+
+        with (
+            patch.object(runner, "_resolve_requested_run_targets", return_value=targets),
+            patch.object(runner, "_prime_platform_progress") as prime,
+        ):
+            platform_ids = handler._prime_run_all_targets({})
+
+        self.assertEqual(platform_ids, ["douyin", "bilibili"])
+        self.assertEqual(prime.call_count, 2)
+        for call in prime.call_args_list:
+            self.assertEqual(call.kwargs["phase"], "queued")
+            self.assertEqual(call.kwargs["message"], "等待采集槽位")
+
     def test_feishu_exception_is_recorded_as_attempted_failure(self):
         handler = runner.Handler.__new__(runner.Handler)
         handler._append_log = lambda *_args: None
@@ -991,6 +1025,20 @@ class FeishuRuntimeTests(unittest.TestCase):
         )
 
         self.assertEqual(ui_status, "completed_empty")
+
+    def test_ui_status_distinguishes_queued_from_running(self):
+        with patch.object(runner, "is_locked", return_value=True):
+            ui_status = runner._ui_status(
+                "bilibili",
+                {
+                    "status": "running",
+                    "phase": "queued",
+                    "message": "等待采集槽位",
+                    "auth_status": "authorized",
+                },
+            )
+
+        self.assertEqual(ui_status, "queued")
 
     def test_ui_status_prioritizes_auth_required_over_completed_when_auth_is_invalid(self):
         ui_status = runner._ui_status(

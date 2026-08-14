@@ -13,6 +13,7 @@ if str(SCRIPT_DIR) not in sys.path:
 import merge_channels
 import prepare_feishu_bitable_sync_v2 as prepare_v2
 import sync_feishu_bitable_openapi as feishu_sync
+from domain import grouping
 
 
 class EpisodeGroupingTests(unittest.TestCase):
@@ -46,6 +47,35 @@ class EpisodeGroupingTests(unittest.TestCase):
         self.assertNotEqual(work_keys["dy-up"], work_keys["dy-down"])
         self.assertEqual(work_keys["dy-march"], work_keys["xhs-march"])
         self.assertEqual(work_keys["dy-march"], work_keys["bili-march"])
+
+    def test_assign_work_keys_groups_short_cross_platform_title_with_full_title(self):
+        rows = [
+            {
+                "平台作品键": "douyin:7669703345283583242",
+                "标题": "如果你用不了Codex，不妨试试这个！ 【Cherry-Studio手把手教程】",
+            },
+            {
+                "平台作品键": "bilibili:BV1Haum6FE8a",
+                "标题": "如果你用不了Codex，不妨试试这个！ 【Cherry-Studio手把手教程】",
+            },
+            {
+                "平台作品键": "xiaohongshu:6a7858d1000000002501771b",
+                "标题": "【Cherry-Studio手把手教程】",
+            },
+        ]
+
+        work_keys = prepare_v2.assign_work_keys(rows)
+
+        self.assertEqual(grouping.TITLE_SIMILARITY_THRESHOLD, 0.40)
+        self.assertEqual(work_keys[rows[0]["平台作品键"]], work_keys[rows[1]["平台作品键"]])
+        self.assertEqual(work_keys[rows[0]["平台作品键"]], work_keys[rows[2]["平台作品键"]])
+
+        merged = merge_channels.assign_group_ids(
+            merge_channels.pd.DataFrame([{"标题": row["标题"]} for row in rows])
+        )
+        self.assertEqual(merge_channels.TITLE_SIMILARITY_THRESHOLD, 0.40)
+        self.assertEqual(merged.loc[0, "group_id"], merged.loc[1, "group_id"])
+        self.assertEqual(merged.loc[0, "group_id"], merged.loc[2, "group_id"])
 
     def test_merge_channels_group_ids_follow_same_episode_rules(self):
         df = merge_channels.pd.DataFrame(

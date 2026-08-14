@@ -37,7 +37,7 @@ STANDARD_COLUMNS = [
 BASE_DIR = Path(resolve_base_dir())
 DOWNLOADS_DIR = Path(resolve_downloads_dir(BASE_DIR))
 
-TITLE_SIMILARITY_THRESHOLD = 0.70
+TITLE_SIMILARITY_THRESHOLD = 0.40
 _EPISODE_TAIL = r"(?:\s+|[，,。.!！?？:：\s【】《》「」『』<>〈〉\d]|$)"
 
 
