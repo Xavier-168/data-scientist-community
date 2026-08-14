@@ -21,7 +21,9 @@ export const startupBridge: StartupBridge = {
       if (isStartupState(event.payload)) listener(event.payload);
     });
   },
-  retry: () => invoke<void>('retry_startup'),
-  openLogs: () => invoke<void>('open_startup_logs'),
+  // 命令名与 Rust 侧 tauri::command 注册名保持一致
+  // （retry_startup_stage / open_startup_log，此前为错误的复数/缺后缀形式）
+  retry: () => invoke<void>('retry_startup_stage'),
+  openLogs: () => invoke<void>('open_startup_log'),
   markInteractive: () => invoke<void>('mark_react_interactive'),
 };

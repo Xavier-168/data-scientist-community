@@ -2,8 +2,7 @@ use std::{
     collections::HashMap,
     ffi::OsStr,
     fs::File,
-    io::{self, Read, Write},
-    os::unix::process::CommandExt,
+    io,
     path::{Path, PathBuf},
     process::Stdio,
     sync::{
@@ -12,6 +11,10 @@ use std::{
     },
     time::Duration,
 };
+#[cfg(unix)]
+use std::io::{Read, Write};
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine as _};
 use fs2::FileExt;
@@ -191,6 +194,9 @@ struct SidecarHandle {
     pid: u32,
     started_at_secs: Option<u64>,
     identity: Option<SidecarIdentity>,
+    /// Windows：持有 Job Object 句柄，drop 时整树终止
+    #[cfg(windows)]
+    job: Option<crate::platform::process::JobHandle>,
 }
 
 #[derive(Clone)]
@@ -199,9 +205,9 @@ pub struct SidecarSupervisor {
     manifest: Arc<VerifiedPackageManifest>,
     preferred_port: u16,
     client: reqwest::Client,
-    state: Arc<File>,
-    runtimes: Arc<File>,
-    downloads: Arc<File>,
+    state: Arc<DirHandle>,
+    runtimes: Arc<DirHandle>,
+    downloads: Arc<DirHandle>,
     lock: Arc<File>,
     lock_held: Arc<AtomicBool>,
     running: Arc<AtomicBool>,
@@ -216,10 +222,18 @@ pub struct SidecarSupervisor {
     watcher_before_cleanup: Arc<std::sync::Mutex<Option<TestHook>>>,
 }
 
+#[cfg(unix)]
 fn same_identity(left: &rustix::fs::Stat, right: &rustix::fs::Stat) -> bool {
     left.st_dev == right.st_dev && left.st_ino == right.st_ino
 }
 
+/// 目录句柄：Unix 持有 fd（锚定防替换）；Windows 为校验过的路径。
+#[cfg(unix)]
+type DirHandle = File;
+#[cfg(windows)]
+type DirHandle = PathBuf;
+
+#[cfg(unix)]
 fn open_directory(path: &Path) -> Result<File, String> {
     use rustix::fs::{fstat, open, FileType, Mode, OFlags};
 
@@ -236,6 +250,16 @@ fn open_directory(path: &Path) -> Result<File, String> {
     Ok(File::from(fd))
 }
 
+#[cfg(windows)]
+fn open_directory(path: &Path) -> Result<PathBuf, String> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("sidecar_directory_invalid".into());
+    }
+    Ok(path.to_path_buf())
+}
+
+#[cfg(unix)]
 fn open_child_directory(parent: &File, name: &str) -> Result<File, String> {
     use rustix::fs::{fstat, openat, FileType, Mode, OFlags};
 
@@ -253,6 +277,12 @@ fn open_child_directory(parent: &File, name: &str) -> Result<File, String> {
     Ok(File::from(fd))
 }
 
+#[cfg(windows)]
+fn open_child_directory(parent: &Path, name: &str) -> Result<PathBuf, String> {
+    open_directory(&parent.join(name)).map_err(|_| "sidecar_directory_invalid".into())
+}
+
+#[cfg(unix)]
 fn ensure_child_directory(parent: &File, name: &str) -> Result<File, String> {
     use rustix::fs::{fchmod, mkdirat, Mode};
 
@@ -266,6 +296,15 @@ fn ensure_child_directory(parent: &File, name: &str) -> Result<File, String> {
     Ok(directory)
 }
 
+#[cfg(windows)]
+fn ensure_child_directory(parent: &Path, name: &str) -> Result<PathBuf, String> {
+    let child = parent.join(name);
+    std::fs::create_dir_all(&child).map_err(|error| error.to_string())?;
+    open_directory(&child)
+}
+
+/// 目录条目存在性探测（Windows 无 inode 身份，仅存在性/类型）。
+#[cfg(unix)]
 fn stat_optional(parent: &File, name: &str) -> Result<Option<rustix::fs::Stat>, String> {
     use rustix::fs::{statat, AtFlags};
 
@@ -273,6 +312,15 @@ fn stat_optional(parent: &File, name: &str) -> Result<Option<rustix::fs::Stat>, 
         Ok(stat) => Ok(Some(stat)),
         Err(rustix::io::Errno::NOENT) => Ok(None),
         Err(error) => Err(io::Error::from(error).to_string()),
+    }
+}
+
+#[cfg(windows)]
+fn stat_optional(parent: &Path, name: &str) -> Result<Option<()>, String> {
+    match std::fs::symlink_metadata(parent.join(name)) {
+        Ok(_) => Ok(Some(())),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.to_string()),
     }
 }
 
@@ -289,8 +337,6 @@ impl SidecarSupervisor {
         manifest: Arc<VerifiedPackageManifest>,
         preferred_port: u16,
     ) -> Result<Self, String> {
-        use rustix::fs::{fchmod, fstat, fsync, openat, FileType, Mode, OFlags};
-
         let metadata = std::fs::symlink_metadata(&state_root).map_err(|error| error.to_string())?;
         if !metadata.is_dir() || metadata.file_type().is_symlink() {
             return Err("sidecar_state_root_invalid".into());
@@ -299,24 +345,41 @@ impl SidecarSupervisor {
         let state = open_directory(&state_root)?;
         let runtimes = ensure_child_directory(&state, "runtimes")?;
         let downloads = ensure_child_directory(&state, "downloads")?;
-        let lock_fd = openat(
-            &runtimes,
-            LOCK_NAME,
-            OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-            Mode::from_raw_mode(0o600),
-        )
-        .map_err(|error| io::Error::from(error).to_string())?;
-        let lock = File::from(lock_fd);
-        let lock_stat = fstat(&lock).map_err(|error| io::Error::from(error).to_string())?;
-        if FileType::from_raw_mode(lock_stat.st_mode) != FileType::RegularFile
-            || lock_stat.st_nlink != 1
-        {
-            return Err("sidecar_lock_invalid".into());
-        }
-        fchmod(&lock, Mode::from_raw_mode(0o600))
+        #[cfg(unix)]
+        let (runtimes, downloads, lock) = {
+            use rustix::fs::{fchmod, fstat, fsync, openat, FileType, Mode, OFlags};
+            let lock_fd = openat(
+                &runtimes,
+                LOCK_NAME,
+                OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
+                Mode::from_raw_mode(0o600),
+            )
             .map_err(|error| io::Error::from(error).to_string())?;
-        fsync(&runtimes).map_err(|error| io::Error::from(error).to_string())?;
-        fsync(&downloads).map_err(|error| io::Error::from(error).to_string())?;
+            let lock = File::from(lock_fd);
+            let lock_stat = fstat(&lock).map_err(|error| io::Error::from(error).to_string())?;
+            if FileType::from_raw_mode(lock_stat.st_mode) != FileType::RegularFile
+                || lock_stat.st_nlink != 1
+            {
+                return Err("sidecar_lock_invalid".into());
+            }
+            fchmod(&lock, Mode::from_raw_mode(0o600))
+                .map_err(|error| io::Error::from(error).to_string())?;
+            fsync(&runtimes).map_err(|error| io::Error::from(error).to_string())?;
+            fsync(&downloads).map_err(|error| io::Error::from(error).to_string())?;
+            (runtimes, downloads, lock)
+        };
+        #[cfg(windows)]
+        let lock = {
+            use std::fs::OpenOptions;
+            // fs2 文件锁在 Windows 上同样可用，锁文件按路径打开
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(runtimes.join(LOCK_NAME))
+                .map_err(|error| error.to_string())?
+        };
         Ok(Self {
             state_root,
             manifest,
@@ -349,6 +412,7 @@ impl SidecarSupervisor {
         self.state_root.join("runtimes").join(IDENTITY_NAME)
     }
 
+    #[cfg(unix)]
     fn verify_visible(&self) -> Result<(), String> {
         use rustix::fs::{fstat, FileType};
 
@@ -378,6 +442,19 @@ impl SidecarSupervisor {
             || visible_lock.st_nlink != 1
             || !same_identity(&visible_lock, &held_lock)
         {
+            return Err("sidecar_lock_changed".into());
+        }
+        Ok(())
+    }
+
+    /// Windows：无 inode 锚定语义，重解析路径确认目录仍指向一致位置。
+    #[cfg(windows)]
+    fn verify_visible(&self) -> Result<(), String> {
+        let state = open_directory(&self.state_root)
+            .map_err(|_| "sidecar_state_root_changed".to_string())?;
+        open_child_directory(&state, "runtimes").map_err(|_| "sidecar_state_root_changed".to_string())?;
+        open_child_directory(&state, "downloads").map_err(|_| "sidecar_state_root_changed".to_string())?;
+        if stat_optional(&self.runtimes, LOCK_NAME)?.is_none() {
             return Err("sidecar_lock_changed".into());
         }
         Ok(())
@@ -512,6 +589,7 @@ impl SidecarSupervisor {
     #[cfg(not(test))]
     fn run_watcher_before_cleanup_hook(&self) {}
 
+    #[cfg(unix)]
     fn open_runner_log(&self) -> Result<File, String> {
         use rustix::fs::{fchmod, fstat, openat, FileType, Mode, OFlags};
 
@@ -547,6 +625,20 @@ impl SidecarSupervisor {
         Ok(file)
     }
 
+    /// Windows：追加写打开日志（无 inode 锚定，依赖默认 ACL）。
+    #[cfg(windows)]
+    fn open_runner_log(&self) -> Result<File, String> {
+        use std::fs::OpenOptions;
+
+        self.verify_visible()?;
+        OpenOptions::new()
+            .append(true)
+            .create(true)
+            .open(self.downloads.join(LOG_NAME))
+            .map_err(|error| error.to_string())
+    }
+
+    #[cfg(unix)]
     fn read_identity(&self) -> Result<Option<SidecarIdentity>, String> {
         use rustix::fs::{fstat, openat, FileType, Mode, OFlags};
 
@@ -584,6 +676,24 @@ impl SidecarSupervisor {
         Ok(Some(identity))
     }
 
+    #[cfg(windows)]
+    fn read_identity(&self) -> Result<Option<SidecarIdentity>, String> {
+        let path = self.runtimes.join(IDENTITY_NAME);
+        let bytes = match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(error) => return Err(error.to_string()),
+        };
+        if bytes.len() > IDENTITY_MAX_BYTES {
+            return Err("sidecar_identity_invalid".into());
+        }
+        let identity: SidecarIdentity =
+            serde_json::from_slice(&bytes).map_err(|_| "sidecar_identity_malformed".to_string())?;
+        identity.validate()?;
+        Ok(Some(identity))
+    }
+
+    #[cfg(unix)]
     fn unlink_identity_raw(&self) -> Result<(), String> {
         use rustix::fs::{fsync, unlinkat, AtFlags};
 
@@ -594,19 +704,20 @@ impl SidecarSupervisor {
         fsync(&*self.runtimes).map_err(|error| io::Error::from(error).to_string())
     }
 
+    #[cfg(windows)]
+    fn unlink_identity_raw(&self) -> Result<(), String> {
+        match std::fs::remove_file(self.runtimes.join(IDENTITY_NAME)) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+            Err(error) => Err(error.to_string()),
+        }
+    }
+
     fn unlink_identity_if_matches(&self, expected: &SidecarIdentity) -> Result<bool, String> {
-        let before = match stat_optional(&self.runtimes, IDENTITY_NAME)? {
-            Some(stat) => stat,
-            None => return Ok(false),
-        };
-        if self.read_identity()?.as_ref() != Some(expected) {
+        if stat_optional(&self.runtimes, IDENTITY_NAME)?.is_none() {
             return Ok(false);
         }
-        let after = match stat_optional(&self.runtimes, IDENTITY_NAME)? {
-            Some(stat) => stat,
-            None => return Ok(false),
-        };
-        if !same_identity(&before, &after) {
+        if self.read_identity()?.as_ref() != Some(expected) {
             return Ok(false);
         }
         self.unlink_identity_raw()?;
@@ -614,27 +725,21 @@ impl SidecarSupervisor {
     }
 
     fn unlink_identity_if_same_owner(&self, expected: &SidecarIdentity) -> Result<bool, String> {
-        let before = match stat_optional(&self.runtimes, IDENTITY_NAME)? {
-            Some(stat) => stat,
-            None => return Ok(false),
-        };
+        if stat_optional(&self.runtimes, IDENTITY_NAME)?.is_none() {
+            return Ok(false);
+        }
         let Some(observed) = self.read_identity()? else {
             return Ok(false);
         };
         if !same_sidecar_owner(&observed, expected) {
             return Ok(false);
         }
-        let after = match stat_optional(&self.runtimes, IDENTITY_NAME)? {
-            Some(stat) => stat,
-            None => return Ok(false),
-        };
-        if !same_identity(&before, &after) {
-            return Ok(false);
-        }
         self.unlink_identity_raw()?;
         Ok(true)
     }
 
+    /// Unix 专属：按 inode 身份删除身份文件。
+    #[cfg(unix)]
     fn unlink_identity_inode_if_matches(
         &self,
         expected: &rustix::fs::Stat,
@@ -650,6 +755,7 @@ impl SidecarSupervisor {
         Ok(true)
     }
 
+    #[cfg(unix)]
     fn write_identity(&self, identity: &SidecarIdentity) -> Result<(), String> {
         use rustix::fs::{fchmod, fsync, openat, renameat, unlinkat, AtFlags, Mode, OFlags};
 
@@ -694,6 +800,28 @@ impl SidecarSupervisor {
         result
     }
 
+    /// Windows：唯一临时名 + rename 的原子写。
+    #[cfg(windows)]
+    fn write_identity(&self, identity: &SidecarIdentity) -> Result<(), String> {
+        self.verify_visible()?;
+        identity.validate()?;
+        let bytes = serde_json::to_vec(identity).map_err(|error| error.to_string())?;
+        if bytes.len() > IDENTITY_MAX_BYTES {
+            return Err("sidecar_identity_invalid".into());
+        }
+        let temporary = self
+            .runtimes
+            .join(format!("{IDENTITY_NAME}.tmp-{}", uuid::Uuid::new_v4()));
+        std::fs::write(&temporary, &bytes).map_err(|error| error.to_string())?;
+        match std::fs::rename(&temporary, self.runtimes.join(IDENTITY_NAME)) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let _ = std::fs::remove_file(&temporary);
+                Err(error.to_string())
+            }
+        }
+    }
+
     fn write_identity_if_absent(&self, identity: &SidecarIdentity) -> Result<(), String> {
         if stat_optional(&self.runtimes, IDENTITY_NAME)?.is_some() {
             return Err("sidecar_identity_exists".into());
@@ -718,8 +846,8 @@ impl SidecarSupervisor {
     fn python_relative(&self) -> Result<PathBuf, String> {
         unique_required_path(
             &self.manifest.manifest().runtimes.core.required_files,
-            "runtime/python-arm64/",
-            "/bin/python3",
+            crate::platform::runtime_python_prefix(),
+            crate::platform::python_entry_suffix(),
             "sidecar_python_required_file_invalid",
         )
     }
@@ -727,8 +855,8 @@ impl SidecarSupervisor {
     fn node_relative(&self) -> Result<PathBuf, String> {
         unique_required_path(
             &self.manifest.manifest().runtimes.collector.required_files,
-            "runtime/node-arm64/",
-            "/bin/node",
+            crate::platform::runtime_node_prefix(),
+            crate::platform::node_entry_suffix(),
             "sidecar_node_required_file_invalid",
         )
     }
@@ -751,12 +879,13 @@ impl SidecarSupervisor {
             return Err("sidecar_lock_not_held".into());
         }
         self.verify_visible()?;
-        let entry = stat_optional(&self.runtimes, IDENTITY_NAME)?;
         let identity = match self.read_identity() {
             Ok(Some(identity)) => identity,
             Ok(None) => return Ok(()),
+            #[cfg(unix)]
             Err(error) if error == "sidecar_identity_malformed" => {
-                if let Some(entry) = entry {
+                // Unix：身份文件损坏时按 inode 身份定向清除
+                if let Some(entry) = stat_optional(&self.runtimes, IDENTITY_NAME)? {
                     self.unlink_identity_inode_if_matches(&entry)?;
                 }
                 return Ok(());
@@ -956,6 +1085,13 @@ impl SidecarSupervisor {
         let (ready_tx, ready_rx) = oneshot::channel();
 
         self.run_before_spawn_hook();
+        #[cfg(windows)]
+        let job_handle = match crate::platform::process::JobHandle::create() {
+            Ok(job) => Some(job),
+            Err(error) => return self.fail_launch(error, &intent).await,
+        };
+        #[cfg(not(windows))]
+        let job_handle: Option<()> = None;
         let mut command = Command::new(&python);
         command
             .kill_on_drop(true)
@@ -974,9 +1110,12 @@ impl SidecarSupervisor {
             "LC_CTYPE",
             "TMPDIR",
             "SHELL",
-            "__CF_USER_TEXT_ENCODING",
-            "SECURITYSESSIONID",
         ] {
+            if let Some(value) = std::env::var_os(key) {
+                command.env(key, value);
+            }
+        }
+        for key in crate::platform::env_paths::passthrough_env_keys() {
             if let Some(value) = std::env::var_os(key) {
                 command.env(key, value);
             }
@@ -984,10 +1123,7 @@ impl SidecarSupervisor {
         command
             .env(
                 "PATH",
-                format!(
-                    "{}:/usr/bin:/bin:/usr/sbin:/sbin",
-                    node_parent.to_string_lossy()
-                ),
+                crate::platform::env_paths::runner_path(node_parent.as_path()),
             )
             .env("NODE_BIN", &node)
             .env("PYTHONDONTWRITEBYTECODE", "1")
@@ -1001,11 +1137,19 @@ impl SidecarSupervisor {
             .env(OWNER_MARKER_ENV, &instance_id)
             .env("YIRENGONGIS_PACKAGE_ID", &package.package_id)
             .env("YIRENGONGIS_BUILD_VERSION", &package.build_version);
+        #[cfg(unix)]
         command.as_std_mut().process_group(0);
+        #[cfg(windows)]
+        crate::platform::process::configure_hidden_command(command.as_std_mut());
         let mut child = match command.spawn() {
             Ok(child) => child,
             Err(error) => return self.fail_launch(error.to_string(), &intent).await,
         };
+        #[cfg(windows)]
+        if let Some(job) = job_handle.as_ref() {
+            // Job Object 覆盖子进程及其后续子进程；壳退出即整树终止
+            let _ = job.assign(child.id().unwrap_or_default());
+        }
         let pid = match child.id() {
             Some(pid) => pid,
             None => {
@@ -1063,6 +1207,8 @@ impl SidecarSupervisor {
             pid,
             started_at_secs: None,
             identity: Some(intent.clone()),
+            #[cfg(windows)]
+            job: job_handle,
         });
 
         let started_at_secs = match Self::process_start_time(pid).await {
@@ -1262,6 +1408,7 @@ fn unix_time_secs() -> Result<u64, String> {
         .map_err(|_| "sidecar_clock_invalid".to_string())
 }
 
+#[cfg(unix)]
 fn current_process_uid() -> Result<u32, String> {
     let mut system = System::new();
     let pid = Pid::from_u32(std::process::id());
@@ -1271,6 +1418,12 @@ fn current_process_uid() -> Result<u32, String> {
         .and_then(|process| process.user_id())
         .map(|uid| **uid)
         .ok_or_else(|| "sidecar_owner_uid_missing".to_string())
+}
+
+/// Windows：owner_uid 记 0（身份匹配退化为 start_time + 环境标记）。
+#[cfg(windows)]
+fn current_process_uid() -> Result<u32, String> {
+    Ok(0)
 }
 
 async fn drain_stdout(
@@ -1431,11 +1584,15 @@ fn process_matches_identity(identity: &SidecarIdentity) -> Result<bool, String> 
     {
         return Ok(false);
     }
-    let pgid = nix::unistd::getpgid(Some(nix::unistd::Pid::from_raw(identity.pid as i32)))
-        .map(|pgid| pgid.as_raw() as u32)
-        .ok();
-    if pgid != Some(identity.pgid) || identity.pgid != identity.pid {
-        return Ok(false);
+    #[cfg(unix)]
+    {
+        // Unix：进程组身份校验（spawn 时 setsid，pgid 应等于 pid）
+        let pgid = nix::unistd::getpgid(Some(nix::unistd::Pid::from_raw(identity.pid as i32)))
+            .map(|pgid| pgid.as_raw() as u32)
+            .ok();
+        if pgid != Some(identity.pgid) || identity.pgid != identity.pid {
+            return Ok(false);
+        }
     }
     let expected_python = std::fs::canonicalize(&identity.python).ok();
     let actual_python = process
@@ -1461,9 +1618,13 @@ fn process_matches_identity(identity: &SidecarIdentity) -> Result<bool, String> 
 
 fn process_has_owner_capability(process: &sysinfo::Process, identity: &SidecarIdentity) -> bool {
     let marker = format!("{OWNER_MARKER_ENV}={}", identity.instance_id);
+    #[cfg(unix)]
     let same_uid = process
         .user_id()
         .is_some_and(|uid| **uid == identity.owner_uid);
+    // Windows：owner_uid 恒为 0，不参与匹配；由启动时间 + 环境标记定位
+    #[cfg(windows)]
+    let same_uid = true;
     same_uid
         && process.start_time() >= identity.launched_at_secs
         && process
@@ -1492,6 +1653,7 @@ fn owner_process_snapshot(identity: &SidecarIdentity) -> HashMap<u32, u64> {
     selected
 }
 
+#[cfg(unix)]
 fn signal_owner_if_same(
     pid: u32,
     started: u64,
@@ -1514,6 +1676,25 @@ fn signal_owner_if_same(
     }
 }
 
+/// Windows：核对身份后用 taskkill /T /F 终止（无信号语义）。
+#[cfg(windows)]
+fn signal_owner_if_same(pid: u32, started: u64, identity: &SidecarIdentity) {
+    if identity.phase != SidecarPhase::Launching
+        && pid == identity.pid
+        && !process_matches_identity(identity).unwrap_or(false)
+    {
+        return;
+    }
+    let mut system = System::new_all();
+    let sys_pid = Pid::from_u32(pid);
+    system.refresh_processes(ProcessesToUpdate::Some(&[sys_pid]), true);
+    if system.process(sys_pid).is_some_and(|process| {
+        process.start_time() == started && process_has_owner_capability(process, identity)
+    }) {
+        crate::platform::process::terminate_tree(pid);
+    }
+}
+
 fn owner_process_is_live_same(pid: u32, started: u64, identity: &SidecarIdentity) -> bool {
     if identity.phase != SidecarPhase::Launching
         && pid == identity.pid
@@ -1529,6 +1710,7 @@ fn owner_process_is_live_same(pid: u32, started: u64, identity: &SidecarIdentity
     })
 }
 
+#[cfg(unix)]
 async fn terminate_owner_processes(identity: &SidecarIdentity) -> Result<(), String> {
     identity.validate()?;
     if identity.phase != SidecarPhase::Launching {
@@ -1626,7 +1808,43 @@ async fn terminate_owner_processes(identity: &SidecarIdentity) -> Result<(), Str
     }
 }
 
-#[cfg(test)]
+/// Windows：对身份匹配的进程逐个 taskkill /T /F，轮询确认退出。
+#[cfg(windows)]
+async fn terminate_owner_processes(identity: &SidecarIdentity) -> Result<(), String> {
+    identity.validate()?;
+    let mut snapshot = owner_process_snapshot(identity);
+    for (target, started) in snapshot.clone() {
+        signal_owner_if_same(target, started, identity);
+    }
+    let deadline = tokio::time::Instant::now() + TERMINATE_GRACE + Duration::from_secs(1);
+    let mut empty_scans = 0_u8;
+    loop {
+        let observed = owner_process_snapshot(identity);
+        for (target, started) in &observed {
+            snapshot.entry(*target).or_insert(*started);
+            signal_owner_if_same(*target, *started, identity);
+        }
+        let survivors: Vec<_> = snapshot
+            .iter()
+            .filter(|(target, started)| owner_process_is_live_same(**target, **started, identity))
+            .map(|(target, _)| *target)
+            .collect();
+        if observed.is_empty() && survivors.is_empty() {
+            empty_scans += 1;
+            if empty_scans >= 2 {
+                return Ok(());
+            }
+        } else {
+            empty_scans = 0;
+        }
+        if tokio::time::Instant::now() >= deadline {
+            return Err(format!("sidecar_descendants_survived:{survivors:?}"));
+        }
+        sleep(Duration::from_millis(50)).await;
+    }
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use std::{
         fs,

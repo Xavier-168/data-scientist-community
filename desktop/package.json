@@ -7,14 +7,14 @@
     "node": ">=22.12.0 <23"
   },
   "scripts": {
-    "dev": "\"$npm_node_execpath\" ../scripts/run_rust_tool.mjs tauri dev",
+    "dev": "node ../scripts/run_rust_tool.mjs tauri dev",
     "dev:web": "vite",
     "build": "npm run build:web",
     "build:web": "npm run typecheck && vite build",
-    "build:app": "\"$npm_node_execpath\" ../scripts/run_rust_tool.mjs tauri build",
+    "build:app": "node ../scripts/run_rust_tool.mjs tauri build",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "test:rust": "\"$npm_node_execpath\" ../scripts/run_rust_tool.mjs cargo test --manifest-path src-tauri/Cargo.toml --locked --all-features && \"$npm_node_execpath\" ../scripts/test_rust_tool_signal.mjs"
+    "test:rust": "node ../scripts/run_rust_tool.mjs cargo test --manifest-path src-tauri/Cargo.toml --locked --all-features && node ../scripts/test_rust_tool_signal.mjs"
   },
   "dependencies": {
     "@tauri-apps/api": "2.11.1",

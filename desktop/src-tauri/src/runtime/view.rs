@@ -1,3 +1,4 @@
+#[cfg(unix)]
 use std::{
     collections::HashMap,
     ffi::{CStr, CString, OsStr, OsString},
@@ -12,23 +13,44 @@ use std::{
     time::Duration,
 };
 
+#[cfg(windows)]
+use std::{
+    ffi::OsStr,
+    io::{self},
+    ops::Deref,
+    path::{Path, PathBuf},
+    sync::{Arc, Mutex},
+};
+
+#[cfg(unix)]
 use fs2::FileExt;
+#[cfg(unix)]
 use serde::{Deserialize, Serialize};
+#[cfg(unix)]
 use uuid::Uuid;
 
 use crate::manifest::VerifiedPackageManifest;
 
 use super::{RuntimeKind, RuntimeResolution};
 
+#[cfg(unix)]
 const VIEW_LOCK_NAME: &str = ".view.lock";
+#[cfg(unix)]
 const MANIFEST_NAME: &str = "package_manifest.json";
+#[cfg(unix)]
 const GENERATION_MARKER_NAME: &str = ".view-generation.json";
+#[cfg(unix)]
 const CURRENT_NAME: &str = "current";
+#[cfg(unix)]
 const CURRENT_NEXT_NAME: &str = "current.next";
+#[cfg(unix)]
 const LOCK_POLL: Duration = Duration::from_millis(25);
+#[cfg(unix)]
 const MAX_VIEW_DEPTH: usize = 256;
+#[cfg(unix)]
 const MAX_METADATA_BYTES: usize = 2 * 1024 * 1024;
 
+#[cfg(unix)]
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct GenerationMarker {
@@ -41,6 +63,7 @@ struct GenerationMarker {
     collector_ino: Option<u64>,
 }
 
+#[cfg(unix)]
 impl GenerationMarker {
     fn core(core: &SourceRoot) -> Self {
         Self {
@@ -88,6 +111,7 @@ impl GenerationMarker {
     }
 }
 
+#[cfg(unix)]
 struct SourceRoot {
     input: PathBuf,
     canonical: PathBuf,
@@ -101,8 +125,10 @@ struct SourceRoot {
     node_modules: Option<File>,
 }
 
+#[cfg(unix)]
 struct ViewFileLock<'a>(&'a File);
 
+#[cfg(unix)]
 impl Drop for ViewFileLock<'_> {
     fn drop(&mut self) {
         let _ = FileExt::unlock(self.0);
@@ -111,17 +137,35 @@ impl Drop for ViewFileLock<'_> {
 
 #[derive(Clone)]
 pub struct VerifiedView {
+    #[cfg(unix)]
     current: PathBuf,
+    #[cfg(unix)]
     target: String,
+    #[cfg(unix)]
     build: Arc<File>,
+    #[cfg(unix)]
     generation: Arc<File>,
+    // Windows：无 generation 视图，直接持有解包后的 core 包根目录，
+    // 以及（激活 collector 后）collector 包根目录。
+    #[cfg(windows)]
+    root: PathBuf,
+    #[cfg(windows)]
+    collector_root: Option<PathBuf>,
 }
 
 impl VerifiedView {
     pub fn path(&self) -> &Path {
-        &self.current
+        #[cfg(unix)]
+        {
+            &self.current
+        }
+        #[cfg(windows)]
+        {
+            &self.root
+        }
     }
 
+    #[cfg(unix)]
     pub(crate) fn verify_visible(&self) -> Result<(), String> {
         use rustix::fs::{fstat, readlinkat, FileType};
 
@@ -163,6 +207,7 @@ impl VerifiedView {
         Ok(())
     }
 
+    #[cfg(unix)]
     pub(crate) fn pinned_launch_root(&self) -> Result<PathBuf, String> {
         use rustix::fs::fstat;
 
@@ -191,6 +236,30 @@ impl VerifiedView {
     }
 }
 
+#[cfg(windows)]
+impl VerifiedView {
+    // Windows 无 fd 锚定与 generation 视图：仅做“core 包目录仍在原位”的
+    // 尽力而为校验（RuntimeManager 负责解包目录的生命周期：保留 active+previous）。
+    pub(crate) fn verify_visible(&self) -> Result<(), String> {
+        match std::fs::symlink_metadata(&self.root) {
+            Ok(metadata) if metadata.is_dir() => Ok(()),
+            _ => Err("view_handle_changed".into()),
+        }
+    }
+
+    // 直接返回解包后的 core 包根目录（python、scripts 与 cwd 都来自这里）。
+    pub(crate) fn pinned_launch_root(&self) -> Result<PathBuf, String> {
+        self.verify_visible()?;
+        Ok(self.root.clone())
+    }
+
+    // collector 包根目录；未激活 collector 时退回 core 根，
+    // 与 Unix 上“runtime/node-arm64 为空目录、NODE_BIN 指向不存在路径”的行为对齐。
+    pub(crate) fn node_root(&self) -> &Path {
+        self.collector_root.as_deref().unwrap_or(&self.root)
+    }
+}
+
 impl Deref for VerifiedView {
     type Target = Path;
 
@@ -207,17 +276,35 @@ impl AsRef<Path> for VerifiedView {
 
 impl std::fmt::Debug for VerifiedView {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter
-            .debug_struct("VerifiedView")
-            .field("current", &self.current)
-            .field("target", &self.target)
-            .finish_non_exhaustive()
+        #[cfg(unix)]
+        {
+            formatter
+                .debug_struct("VerifiedView")
+                .field("current", &self.current)
+                .field("target", &self.target)
+                .finish_non_exhaustive()
+        }
+        #[cfg(windows)]
+        {
+            formatter
+                .debug_struct("VerifiedView")
+                .field("root", &self.root)
+                .field("collector_root", &self.collector_root)
+                .finish_non_exhaustive()
+        }
     }
 }
 
 impl PartialEq for VerifiedView {
     fn eq(&self, other: &Self) -> bool {
-        self.current == other.current
+        #[cfg(unix)]
+        {
+            self.current == other.current
+        }
+        #[cfg(windows)]
+        {
+            self.root == other.root && self.collector_root == other.collector_root
+        }
     }
 }
 
@@ -225,32 +312,152 @@ impl Eq for VerifiedView {}
 
 #[derive(Clone)]
 pub struct ViewManager {
+    #[cfg(unix)]
     state_root: PathBuf,
+    #[cfg(unix)]
     build_root: PathBuf,
+    #[cfg(unix)]
     manifest: Arc<VerifiedPackageManifest>,
+    #[cfg(unix)]
     _state: Arc<File>,
+    #[cfg(unix)]
     downloads: Arc<File>,
+    #[cfg(unix)]
     auth: Arc<File>,
+    #[cfg(unix)]
     _views: Arc<File>,
+    #[cfg(unix)]
     build: Arc<File>,
+    #[cfg(unix)]
     lock: Arc<File>,
     gate: Arc<Mutex<()>>,
-    #[cfg(test)]
+    // Windows：无 generation 目录、无锁文件；只记录最近一次激活的启动根。
+    #[cfg(windows)]
+    active: Arc<Mutex<Option<VerifiedView>>>,
+    #[cfg(all(test, unix))]
     fail_switch_sync: Arc<std::sync::atomic::AtomicBool>,
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fail_pre_switch_sync: Arc<std::sync::atomic::AtomicBool>,
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fail_switch_rename: Arc<std::sync::atomic::AtomicBool>,
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fail_generation_parent_sync: Arc<std::sync::atomic::AtomicBool>,
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     fail_verified_view: Arc<std::sync::atomic::AtomicBool>,
 }
 
+#[cfg(windows)]
+impl ViewManager {
+    pub fn new(
+        state_root: PathBuf,
+        manifest: Arc<VerifiedPackageManifest>,
+    ) -> Result<Self, String> {
+        let build_version = manifest.manifest().build_version.clone();
+        if !valid_version(&build_version) {
+            return Err("view_build_version_invalid".into());
+        }
+        let metadata = std::fs::symlink_metadata(&state_root).map_err(|error| error.to_string())?;
+        if !metadata.is_dir() {
+            return Err("view_state_root_invalid".into());
+        }
+        let state_root = std::fs::canonicalize(&state_root).map_err(|error| error.to_string())?;
+        // 与 Unix 版保持相同的目录骨架（downloads/.auth）；Windows 上没有
+        // generation 视图与 .view.lock，runtimes 目录由 RuntimeManager 负责。
+        for name in ["downloads", ".auth"] {
+            let directory = state_root.join(name);
+            match std::fs::create_dir(&directory) {
+                Ok(()) => {}
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+                    let metadata = std::fs::symlink_metadata(&directory)
+                        .map_err(|error| error.to_string())?;
+                    if !metadata.is_dir() {
+                        return Err("view_state_child_invalid".into());
+                    }
+                }
+                Err(error) => return Err(error.to_string()),
+            }
+        }
+        Ok(Self {
+            gate: Arc::new(Mutex::new(())),
+            active: Arc::new(Mutex::new(None)),
+        })
+    }
+
+    pub fn activate_core(&self, core: &RuntimeResolution) -> Result<VerifiedView, String> {
+        self.activate_with_collector(core, None)
+    }
+
+    pub fn activate_collector(
+        &self,
+        core: &RuntimeResolution,
+        collector: &RuntimeResolution,
+    ) -> Result<VerifiedView, String> {
+        self.activate_with_collector(core, Some(collector))
+    }
+
+    // Windows：activate_* 只把 RuntimeManager 已解包并通过校验的包目录记录为
+    // 启动根；不做符号链接 generation、不做目录清理（RuntimeManager 拥有
+    // 解包目录的生命周期）。core-only 激活时保留已激活的 collector，与 Unix
+    // 的“不降级”语义对齐。
+    fn activate_with_collector(
+        &self,
+        core: &RuntimeResolution,
+        collector: Option<&RuntimeResolution>,
+    ) -> Result<VerifiedView, String> {
+        let _gate = self
+            .gate
+            .lock()
+            .map_err(|_| "view_gate_poisoned".to_string())?;
+        let root = validate_launch_root(core, RuntimeKind::Core)?;
+        let collector_root = match collector {
+            Some(collector) => Some(validate_launch_root(collector, RuntimeKind::Collector)?),
+            None => self
+                .active
+                .lock()
+                .map_err(|_| "view_gate_poisoned".to_string())?
+                .as_ref()
+                .and_then(|view| view.collector_root.clone()),
+        };
+        let view = VerifiedView {
+            root,
+            collector_root,
+        };
+        *self
+            .active
+            .lock()
+            .map_err(|_| "view_gate_poisoned".to_string())? = Some(view.clone());
+        Ok(view)
+    }
+}
+
+// 与 Unix normalize_source 相同的基础校验：kind、版本号规则、目录 basename
+// 必须等于版本号；目录必须真实存在（Windows 上 symlink_metadata 不跟随，
+// 目录联接/符号链接会被 is_dir() 判定为非目录而拒绝）。
+#[cfg(windows)]
+fn validate_launch_root(
+    resolution: &RuntimeResolution,
+    kind: RuntimeKind,
+) -> Result<PathBuf, String> {
+    if resolution.kind() != kind
+        || !valid_version(resolution.version())
+        || resolution.root().file_name() != Some(OsStr::new(resolution.version()))
+    {
+        return Err("view_resolution_invalid".into());
+    }
+    let metadata =
+        std::fs::symlink_metadata(resolution.root()).map_err(|error| error.to_string())?;
+    if !metadata.is_dir() {
+        return Err("view_source_not_real_directory".into());
+    }
+    std::fs::canonicalize(resolution.root()).map_err(|error| error.to_string())
+}
+
+#[cfg(unix)]
 fn same_identity(left: &rustix::fs::Stat, right: &rustix::fs::Stat) -> bool {
     left.st_dev == right.st_dev && left.st_ino == right.st_ino
 }
 
+#[cfg(unix)]
 fn open_directory(path: &Path) -> Result<File, String> {
     use rustix::fs::{fstat, open, FileType, Mode, OFlags};
 
@@ -267,6 +474,7 @@ fn open_directory(path: &Path) -> Result<File, String> {
     Ok(File::from(fd))
 }
 
+#[cfg(unix)]
 fn open_child_directory<P: rustix::path::Arg>(parent: &File, name: P) -> Result<File, String> {
     use rustix::fs::{fstat, openat, FileType, Mode, OFlags};
 
@@ -284,6 +492,7 @@ fn open_child_directory<P: rustix::path::Arg>(parent: &File, name: P) -> Result<
     Ok(File::from(fd))
 }
 
+#[cfg(unix)]
 fn ensure_child_directory(parent: &File, name: &str, mode: u16) -> Result<File, String> {
     use rustix::fs::{mkdirat, Mode};
 
@@ -293,6 +502,7 @@ fn ensure_child_directory(parent: &File, name: &str, mode: u16) -> Result<File, 
     }
 }
 
+#[cfg(unix)]
 fn stat_optional<P: rustix::path::Arg>(
     parent: &File,
     name: P,
@@ -306,6 +516,7 @@ fn stat_optional<P: rustix::path::Arg>(
     }
 }
 
+#[cfg(unix)]
 fn read_regular(parent: &File, name: &str) -> Result<Vec<u8>, String> {
     use rustix::fs::{fstat, openat, FileType, Mode, OFlags};
 
@@ -335,6 +546,7 @@ fn read_regular(parent: &File, name: &str) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
+#[cfg(unix)]
 fn write_regular(parent: &File, name: &str, bytes: &[u8], mode: u16) -> Result<(), String> {
     use rustix::fs::{fchmod, openat, Mode, OFlags};
 
@@ -356,9 +568,12 @@ fn write_regular(parent: &File, name: &str, bytes: &[u8], mode: u16) -> Result<(
     file.sync_all().map_err(|error| error.to_string())
 }
 
+#[cfg(unix)]
 type ViewGate = Mutex<()>;
+#[cfg(unix)]
 type ViewGateRegistry = Mutex<HashMap<(u64, u64), Weak<ViewGate>>>;
 
+#[cfg(unix)]
 fn shared_gate(identity: (u64, u64)) -> Result<Arc<ViewGate>, String> {
     static REGISTRY: OnceLock<ViewGateRegistry> = OnceLock::new();
     let registry = REGISTRY.get_or_init(|| Mutex::new(HashMap::new()));
@@ -385,10 +600,12 @@ fn valid_version(value: &str) -> bool {
         && !value.contains(".tmp-")
 }
 
+#[cfg(unix)]
 fn component_replacement_allowed(current: &str, requested: &str, signed: &str) -> bool {
     current == requested || requested == signed
 }
 
+#[cfg(unix)]
 fn normalize_source(
     resolution: &RuntimeResolution,
     kind: RuntimeKind,
@@ -451,6 +668,7 @@ fn normalize_source(
     })
 }
 
+#[cfg(unix)]
 fn open_relative_directory(root: &File, relative: &str) -> Result<File, String> {
     let mut directory =
         File::from(rustix::io::dup(root).map_err(|error| io::Error::from(error).to_string())?);
@@ -460,6 +678,7 @@ fn open_relative_directory(root: &File, relative: &str) -> Result<File, String> 
     Ok(directory)
 }
 
+#[cfg(unix)]
 fn verify_source_visible(source: &SourceRoot) -> Result<(), String> {
     use rustix::fs::fstat;
 
@@ -491,6 +710,7 @@ fn verify_source_visible(source: &SourceRoot) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn relative_path(from: &Path, target: &Path) -> Result<PathBuf, String> {
     let from: Vec<_> = from.components().collect();
     let target: Vec<_> = target.components().collect();
@@ -514,6 +734,7 @@ fn relative_path(from: &Path, target: &Path) -> Result<PathBuf, String> {
     Ok(result)
 }
 
+#[cfg(unix)]
 fn safe_internal_link(relative_parent: &Path, target: &Path) -> bool {
     if target.is_absolute() {
         return false;
@@ -530,6 +751,7 @@ fn safe_internal_link(relative_parent: &Path, target: &Path) -> bool {
     true
 }
 
+#[cfg(unix)]
 fn copy_regular(
     source: &File,
     destination: &File,
@@ -563,6 +785,7 @@ fn copy_regular(
     }
 }
 
+#[cfg(unix)]
 fn overlay_scripts(
     source: &File,
     destination: &File,
@@ -642,6 +865,7 @@ fn overlay_scripts(
     Ok(())
 }
 
+#[cfg(unix)]
 fn directory_names(directory: &File) -> Result<Vec<CString>, String> {
     use rustix::fs::Dir;
 
@@ -656,6 +880,7 @@ fn directory_names(directory: &File) -> Result<Vec<CString>, String> {
     Ok(names)
 }
 
+#[cfg(unix)]
 fn directory_has_mode(directory: &File, mode: u16) -> Result<bool, String> {
     use rustix::fs::{fstat, FileType};
 
@@ -666,6 +891,7 @@ fn directory_has_mode(directory: &File, mode: u16) -> Result<bool, String> {
     )
 }
 
+#[cfg(unix)]
 fn validate_scripts_overlay(
     core: Option<&File>,
     collector: Option<&File>,
@@ -792,6 +1018,7 @@ fn validate_scripts_overlay(
     Ok(true)
 }
 
+#[cfg(unix)]
 fn seal_directory_tree(directory: &File) -> Result<(), String> {
     use rustix::fs::{fchmod, fsync, statat, AtFlags, FileType, Mode};
 
@@ -808,6 +1035,7 @@ fn seal_directory_tree(directory: &File) -> Result<(), String> {
     fsync(directory).map_err(|error| io::Error::from(error).to_string())
 }
 
+#[cfg(unix)]
 fn remove_contents(directory: &File, depth: usize) -> Result<(), String> {
     use rustix::fs::{
         fchmod, fstat, openat, statat, unlinkat, AtFlags, Dir, FileType, Mode, OFlags,
@@ -866,10 +1094,12 @@ fn remove_contents(directory: &File, depth: usize) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn remove_name(parent: &File, name: &str) -> Result<(), String> {
     remove_name_with_hook(parent, name, || {})
 }
 
+#[cfg(unix)]
 fn remove_name_with_hook<F: FnOnce()>(
     parent: &File,
     name: &str,
@@ -909,11 +1139,13 @@ fn remove_name_with_hook<F: FnOnce()>(
     Ok(())
 }
 
+#[cfg(unix)]
 fn parse_uuid_name<'a>(value: &'a str, prefix: &str) -> Option<&'a str> {
     let suffix = value.strip_prefix(prefix)?;
     Uuid::parse_str(suffix).ok().map(|_| suffix)
 }
 
+#[cfg(unix)]
 fn validate_regular_mode(parent: &File, name: &str, mode: u16) -> Result<(), String> {
     use rustix::fs::FileType;
 
@@ -928,6 +1160,7 @@ fn validate_regular_mode(parent: &File, name: &str, mode: u16) -> Result<(), Str
     Ok(())
 }
 
+#[cfg(unix)]
 fn validate_relative_link(
     parent: &File,
     name: &str,
@@ -957,6 +1190,7 @@ fn validate_relative_link(
     Ok(target)
 }
 
+#[cfg(unix)]
 fn validate_empty_directory(parent: &File, name: &str) -> Result<(), String> {
     use rustix::fs::Dir;
 
@@ -974,6 +1208,7 @@ fn validate_empty_directory(parent: &File, name: &str) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn validate_linked_directory_identity(
     parent_path: &Path,
     target: &Path,
@@ -993,6 +1228,7 @@ fn validate_linked_directory_identity(
     Ok(())
 }
 
+#[cfg(unix)]
 impl ViewManager {
     pub fn new(
         state_root: PathBuf,
@@ -1879,7 +2115,8 @@ impl ViewManager {
     }
 }
 
-#[cfg(test)]
+// Unix 专属的 generation 视图测试：整体仅在 Unix 下编译运行。
+#[cfg(all(test, unix))]
 mod tests {
     use std::{
         fs,

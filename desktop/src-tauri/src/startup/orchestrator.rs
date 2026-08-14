@@ -851,11 +851,17 @@ mod tests {
                 "version": format!("{kind}-v1")
             })
         };
+        // 清单架构跟随构建目标（macOS=arm64 / Windows=x86_64）
+        let target_arch = if cfg!(windows) { "x86_64" } else { "arm64" };
         let payload = json!({
-            "arch": "arm64",
+            "arch": target_arch,
             "build_version": "20260713",
             "key_id": "test-key",
-            "package_id": "data-scientist-community-mac-arm64",
+            "package_id": format!(
+                "data-scientist-community-{}-{}",
+                if cfg!(windows) { "win" } else { "mac" },
+                target_arch
+            ),
             "runtimes": {
                 "core": descriptor("core", vec!["frontend-compat/progress.html", "scripts/_run.py"]),
                 "collector": descriptor("collector", vec!["node_modules/playwright/package.json", "scripts/douyin_export.mjs"]),

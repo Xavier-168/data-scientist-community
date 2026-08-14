@@ -1,0 +1,75 @@
+//! 为 runner 子进程构建的最小环境变量。
+
+/// sidecar 环境的 PATH：node 目录优先，随后是系统目录。
+/// Unix 用 ':' 与 /usr/bin；Windows 用 ';' 与系统目录。
+pub fn runner_path(node_bin_dir: &std::path::Path) -> std::ffi::OsString {
+    #[cfg(unix)]
+    {
+        let mut value = std::ffi::OsString::new();
+        value.push(node_bin_dir.as_os_str());
+        value.push(":/usr/bin:/bin:/usr/sbin:/sbin");
+        value
+    }
+    #[cfg(windows)]
+    {
+        // System32 提供 cmd/taskkill/netstat；WindowsPowerShell 供进程检查兜底。
+        let system_root =
+            std::env::var_os("SystemRoot").unwrap_or_else(|| "C:\\Windows".into());
+        let mut value = std::ffi::OsString::new();
+        value.push(node_bin_dir.as_os_str());
+        value.push(";");
+        value.push(&system_root);
+        value.push("\\System32;");
+        value.push(&system_root);
+        value.push(";");
+        value.push(&system_root);
+        value.push("\\System32\\Wbem;");
+        value.push(&system_root);
+        value.push("\\System32\\WindowsPowerShell\\v1.0");
+        value
+    }
+}
+
+/// 环境变量透传白名单（父进程 → runner）。
+pub fn passthrough_env_keys() -> &'static [&'static str] {
+    #[cfg(target_os = "macos")]
+    {
+        &["__CF_USER_TEXT_ENCODING", "SECURITYSESSIONID"]
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        &[]
+    }
+}
+
+/// 状态目录根（每用户应用数据）。
+pub fn app_state_root(app_name: &str, package_id: &str) -> Result<std::path::PathBuf, String> {
+    #[cfg(target_os = "macos")]
+    {
+        let home = std::env::var_os("HOME").ok_or("home_missing")?;
+        let mut root = std::path::PathBuf::from(home);
+        root.push("Library");
+        root.push("Application Support");
+        root.push(app_name);
+        if !package_id.is_empty() {
+            root.push(package_id);
+        }
+        Ok(root)
+    }
+    #[cfg(windows)]
+    {
+        let appdata = std::env::var_os("APPDATA")
+            .ok_or_else(|| "appdata_missing".to_string())?;
+        let mut root = std::path::PathBuf::from(appdata);
+        root.push(app_name);
+        if !package_id.is_empty() {
+            root.push(package_id);
+        }
+        Ok(root)
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
+    {
+        let _ = (app_name, package_id);
+        Err("unsupported_platform".into())
+    }
+}

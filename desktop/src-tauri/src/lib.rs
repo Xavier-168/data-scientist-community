@@ -1,26 +1,19 @@
 pub mod fault_injection;
 pub mod install;
 pub mod manifest;
+pub mod platform;
 pub mod runtime;
 pub mod sidecar;
 pub mod startup;
 
 use std::{
     error::Error,
-    ffi::OsStr,
-    fs::{self, File},
-    io::Write,
-    path::{Component, Path, PathBuf},
-    process::Command,
+    fs,
+    path::{Path, PathBuf},
     sync::Arc,
     time::Instant,
 };
 
-use rustix::{
-    fd::OwnedFd,
-    fs::{fstat, mkdirat, open, openat, FileType, Mode, OFlags, Stat},
-    io::Errno,
-};
 use startup::{
     metrics::{StartupMetricEvent, StartupMetrics},
     model::{RetryStage, StartupSnapshot},
@@ -55,16 +48,7 @@ async fn retry_startup_stage(
 #[tauri::command]
 fn open_startup_log(state_root: tauri::State<'_, StateRoot>) -> Result<(), String> {
     let log_path = prepare_startup_log(&state_root.0)?;
-
-    let reveal_args = [OsStr::new("-R"), log_path.as_os_str()];
-    let status = Command::new("/usr/bin/open")
-        .args(reveal_args)
-        .status()
-        .map_err(|_| "startup_log_open_failed".to_string())?;
-    if !status.success() {
-        return Err("startup_log_open_failed".to_string());
-    }
-    Ok(())
+    crate::platform::reveal::reveal_path(&log_path)
 }
 
 #[tauri::command]
@@ -95,10 +79,12 @@ async fn open_legacy_console(
     Ok(())
 }
 
+#[cfg(unix)]
 fn prepare_startup_log(app_data: &Path) -> Result<PathBuf, String> {
     prepare_startup_log_with_hook(app_data, || {})
 }
 
+#[cfg(unix)]
 fn prepare_startup_log_with_hook<F>(
     app_data: &Path,
     after_downloads_open: F,
@@ -126,10 +112,12 @@ where
     Ok(app_data.join("downloads").join(RUNNER_LOG_NAME))
 }
 
+#[cfg(unix)]
 fn ensure_real_directory(path: &Path) -> Result<(), String> {
     open_real_directory_path(path, true).map(|_| ())
 }
 
+#[cfg(unix)]
 fn open_real_directory_path(path: &Path, create_missing: bool) -> Result<OwnedFd, String> {
     if path.as_os_str().is_empty() {
         return Err(log_prepare_error());
@@ -163,6 +151,7 @@ fn open_real_directory_path(path: &Path, create_missing: bool) -> Result<OwnedFd
     Ok(current)
 }
 
+#[cfg(unix)]
 fn open_or_create_startup_log(downloads_fd: &OwnedFd) -> Result<File, String> {
     let create_flags =
         OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
@@ -197,6 +186,7 @@ fn open_or_create_startup_log(downloads_fd: &OwnedFd) -> Result<File, String> {
     Ok(log_file)
 }
 
+#[cfg(unix)]
 fn validate_visible_log_identity(
     app_data: &Path,
     app_fd: &OwnedFd,
@@ -226,18 +216,21 @@ fn validate_visible_log_identity(
     require_same_file_identity(log_file, &visible_log)
 }
 
+#[cfg(unix)]
 fn require_same_identity(left: &OwnedFd, right: &OwnedFd) -> Result<(), String> {
     let left_stat = fstat(left).map_err(|_| log_prepare_error())?;
     let right_stat = fstat(right).map_err(|_| log_prepare_error())?;
     require_matching_stat(&left_stat, &right_stat)
 }
 
+#[cfg(unix)]
 fn require_same_file_identity(left: &File, right: &File) -> Result<(), String> {
     let left_stat = fstat(left).map_err(|_| log_prepare_error())?;
     let right_stat = fstat(right).map_err(|_| log_prepare_error())?;
     require_matching_stat(&left_stat, &right_stat)
 }
 
+#[cfg(unix)]
 fn require_matching_stat(left: &Stat, right: &Stat) -> Result<(), String> {
     if left.st_dev != right.st_dev || left.st_ino != right.st_ino {
         return Err(log_prepare_error());
@@ -245,6 +238,7 @@ fn require_matching_stat(left: &Stat, right: &Stat) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn require_file_type(stat: &Stat, expected: FileType) -> Result<(), String> {
     if FileType::from_raw_mode(stat.st_mode) != expected {
         return Err(log_prepare_error());
@@ -252,18 +246,22 @@ fn require_file_type(stat: &Stat, expected: FileType) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn directory_open_flags() -> OFlags {
     OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC
 }
 
+#[cfg(unix)]
 fn existing_log_open_flags() -> OFlags {
     OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK
 }
 
+#[cfg(unix)]
 fn log_prepare_error() -> String {
     "startup_log_prepare_failed".to_string()
 }
 
+#[cfg(unix)]
 fn containing_app(executable: &Path) -> Option<PathBuf> {
     executable
         .ancestors()
@@ -271,25 +269,72 @@ fn containing_app(executable: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
+/// Windows：启动日志准备（downloads 目录 + runner 日志文件）。
+/// 不做 fd 锚定校验（无 dir_fd 语义），依赖唯一文件名与默认 ACL。
+#[cfg(windows)]
+fn prepare_startup_log(app_data: &Path) -> Result<PathBuf, String> {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+
+    let downloads = app_data.join("downloads");
+    std::fs::create_dir_all(&downloads).map_err(|_| log_prepare_error())?;
+    let log_path = downloads.join(RUNNER_LOG_NAME);
+    let mut created = false;
+    match OpenOptions::new().write(true).create_new(true).open(&log_path) {
+        Ok(mut handle) => {
+            created = true;
+            handle
+                .write_all(b"startup logging initialized\n")
+                .map_err(|_| log_prepare_error())?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(_) => return Err(log_prepare_error()),
+    }
+    if !created && !log_path.is_file() {
+        return Err(log_prepare_error());
+    }
+    Ok(log_path)
+}
+
+#[cfg(windows)]
+fn ensure_real_directory(path: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(path).map_err(|_| log_prepare_error())
+}
+
+#[cfg(windows)]
+fn log_prepare_error() -> String {
+    "startup_log_prepare_failed".to_string()
+}
+
+/// Windows：应用负载目录在 resources/ 子目录下（tauri 资源映射约定）。
+fn payload_dir(resource_dir: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        resource_dir.join("resources")
+    }
+    #[cfg(not(windows))]
+    {
+        resource_dir.to_path_buf()
+    }
+}
+
 fn setup_desktop(app: &mut tauri::App, process_started: Instant) -> Result<(), Box<dyn Error>> {
     let resource_dir = app.path().resource_dir()?;
-    let manifest_bytes = fs::read(resource_dir.join("package_manifest.json"))?;
-    let key_bundle_bytes = fs::read(resource_dir.join("scripts/package_public_keys.json"))?;
+    let payload = payload_dir(&resource_dir);
+    let manifest_bytes = fs::read(payload.join("package_manifest.json"))?;
+    let key_bundle_bytes = fs::read(payload.join("scripts/package_public_keys.json"))?;
     let manifest = Arc::new(VerifiedPackageManifest::from_signed(
         &manifest_bytes,
         &key_bundle_bytes,
     )?);
     let faults = fault_injection::from_env();
-    let home = PathBuf::from(
-        std::env::var_os("HOME").ok_or_else(|| std::io::Error::other("home_missing"))?,
-    );
-    let state_root = faults.state_root.clone().unwrap_or_else(|| {
-        home.join("Library/Application Support/数据科学家")
-            .join(&manifest.manifest().package_id)
-    });
+    let state_root = match faults.state_root.clone() {
+        Some(explicit) => explicit,
+        None => platform::env_paths::app_state_root("数据科学家", &manifest.manifest().package_id)
+            .map_err(|error| std::io::Error::other(format!("state_root_missing:{error}")))?,
+    };
     ensure_real_directory(&state_root).map_err(std::io::Error::other)?;
-    let source_app = containing_app(&std::env::current_exe()?)
-        .unwrap_or_else(|| home.join("Applications/数据科学家 Community.app"));
+    let source_app = source_app_path()?;
 
     let metrics = StartupMetrics::new(state_root.join("startup-metrics.jsonl"), process_started)
         .map_err(std::io::Error::other)?;
@@ -299,7 +344,7 @@ fn setup_desktop(app: &mut tauri::App, process_started: Instant) -> Result<(), B
     let store = StartupStore::default();
     let runtimes = RuntimeManager::new(
         state_root.clone(),
-        resource_dir.join("runtime-packs"),
+        payload.join("runtime-packs"),
         Arc::clone(&manifest),
         faults.clone(),
     )
@@ -308,7 +353,12 @@ fn setup_desktop(app: &mut tauri::App, process_started: Instant) -> Result<(), B
         .map_err(std::io::Error::other)?;
     let sidecar = SidecarSupervisor::new(state_root.clone(), Arc::clone(&manifest))
         .map_err(std::io::Error::other)?;
-    let installer = InstallManager::new(source_app, home, Arc::clone(&manifest), faults);
+    let installer = InstallManager::new(
+        source_app,
+        state_root.clone(),
+        Arc::clone(&manifest),
+        faults,
+    );
     let orchestrator = Arc::new(StartupOrchestrator::new(StartupDependencies {
         events: Arc::new(TauriStartupEventSink::new(app.handle().clone())),
         store: store.clone(),
@@ -327,6 +377,26 @@ fn setup_desktop(app: &mut tauri::App, process_started: Instant) -> Result<(), B
     app.manage(Arc::clone(&orchestrator));
     orchestrator.launch();
     Ok(())
+}
+
+/// macOS：当前 exe 所属 .app；缺失时回退 ~/Applications 默认安装位。
+#[cfg(unix)]
+fn source_app_path() -> Result<PathBuf, Box<dyn Error>> {
+    let home = PathBuf::from(
+        std::env::var_os("HOME").ok_or_else(|| std::io::Error::other("home_missing"))?,
+    );
+    Ok(containing_app(&std::env::current_exe()?)
+        .unwrap_or_else(|| home.join("Applications/数据科学家 Community.app")))
+}
+
+/// Windows：NSIS 已安装到位，source 即 exe 所在目录。
+#[cfg(windows)]
+fn source_app_path() -> Result<PathBuf, Box<dyn Error>> {
+    let exe = std::env::current_exe()?;
+    Ok(exe
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(".")))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -354,7 +424,8 @@ pub fn run() {
     });
 }
 
-#[cfg(test)]
+// 测试基于 symlink/权限位等 Unix 语义，Windows 下跳过
+#[cfg(all(test, unix))]
 mod tests {
     use std::{
         fs,

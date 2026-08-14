@@ -282,21 +282,36 @@ fn verify_signed_manifest_core(
 
     let manifest: PackageManifest = serde_json::from_value(envelope.payload)
         .map_err(|error| ManifestError::Schema(error.to_string()))?;
-    let arm64 = manifest.arch == "arm64"
+    let target_arch = expected_manifest_arch();
+    let arch_matches = manifest.arch == target_arch
         || manifest
             .supported_architectures
             .iter()
-            .any(|architecture| architecture == "arm64");
+            .any(|architecture| architecture == target_arch);
     if !valid_identifier(&manifest.key_id)
         || !valid_identifier(&manifest.package_id)
         || !valid_identifier(&manifest.build_version)
-        || !arm64
+        || !arch_matches
     {
-        return Err(ManifestError::Schema("package identity or arm64".into()));
+        return Err(ManifestError::Schema(format!(
+            "package identity or {target_arch}"
+        )));
     }
     validate_descriptor("core", &manifest.runtimes.core)?;
     validate_descriptor("collector", &manifest.runtimes.collector)?;
     Ok(manifest)
+}
+
+/// 清单必须声明与本构建目标一致的架构。
+fn expected_manifest_arch() -> &'static str {
+    if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        "arm64"
+    } else if cfg!(windows) {
+        "x86_64"
+    } else {
+        // 其余平台未发布，按空串拒绝所有清单
+        ""
+    }
 }
 
 #[cfg(test)]
@@ -309,13 +324,19 @@ mod tests {
     use serde_json::{json, Value};
 
     fn payload() -> Value {
+        // 清单架构跟随构建目标（macOS=arm64 / Windows=x86_64）
+        let target_arch = expected_manifest_arch();
         json!({
-            "arch": "arm64",
+            "arch": target_arch,
             "build_version": "20260711",
             "customer_name": "测试客户",
             "features": ["采集", "analytics"],
             "key_id": "test-key",
-            "package_id": "data-scientist-community-mac-arm64",
+            "package_id": format!(
+                "data-scientist-community-{}-{}",
+                if cfg!(windows) { "win" } else { "mac" },
+                target_arch
+            ),
             "runtimes": {
                 "core": {
                     "version": "core-20260711.1",
@@ -369,6 +390,9 @@ mod tests {
     fn canonical_json_matches_python_package_identity_bytes() {
         let mut canonical = String::new();
         canonical_json(&payload(), &mut canonical).unwrap();
+        // 期望串由 Python package_identity.serialize_manifest_payload
+        // 的规范化规则（sort_keys + 紧凑分隔符 + 非 ASCII 原样）导出，
+        // 平台字段按构建目标替换
         let expected = concat!(
             "{\"arch\":\"arm64\",\"build_version\":\"20260711\",",
             "\"customer_name\":\"测试客户\",\"features\":[\"采集\",\"analytics\"],",
@@ -386,6 +410,15 @@ mod tests {
             "\"size_bytes\":100,\"tree_sha256\":\"",
             "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
             "\",\"version\":\"core-20260711.1\"}}}"
+        )
+        .replace("\"arch\":\"arm64\"", &format!("\"arch\":\"{}\"", expected_manifest_arch()))
+        .replace(
+            "data-scientist-community-mac-arm64",
+            &format!(
+                "data-scientist-community-{}-{}",
+                if cfg!(windows) { "win" } else { "mac" },
+                expected_manifest_arch()
+            ),
         );
         assert_eq!(canonical, expected);
     }
@@ -395,14 +428,26 @@ mod tests {
         let manifest = verify(payload()).unwrap();
         assert_eq!(manifest.runtimes.core.version, "core-20260711.1");
         assert_eq!(manifest.runtimes.core.tree_sha256, "c".repeat(64));
-        assert_eq!(manifest.package_id, "data-scientist-community-mac-arm64");
+        assert_eq!(
+            manifest.package_id,
+            format!(
+                "data-scientist-community-{}-{}",
+                if cfg!(windows) { "win" } else { "mac" },
+                expected_manifest_arch()
+            )
+        );
     }
 
     #[test]
     fn accepts_static_signature_generated_by_python_package_identity() {
+        // 静态签名由 Python package_identity（同种子 [7;32] 密钥）按平台载荷生成
+        #[cfg(unix)]
+        let static_signature = "OGvwmbzJz_pcyv5uSvUVIpUGRvaQRcjk3jvw4lDmy8akhorvr4LR0Gf2H5avMzZDAAfeSFNpkhz0CriHq6jJDg";
+        #[cfg(windows)]
+        let static_signature = "M1AK7vnqHhzdyb80FCtg9efy3J7r7mjJDd70gS8Sraur66gaZ8xSXvlLRbb93A7CQgBxcW-7fHyKI5x39ylmBw";
         let manifest = serde_json::to_vec(&json!({
             "payload": payload(),
-            "signature": "OGvwmbzJz_pcyv5uSvUVIpUGRvaQRcjk3jvw4lDmy8akhorvr4LR0Gf2H5avMzZDAAfeSFNpkhz0CriHq6jJDg"
+            "signature": static_signature
         }))
         .unwrap();
         let keys = serde_json::to_vec(&json!({
@@ -519,9 +564,17 @@ mod tests {
             Err(ManifestError::Schema(_))
         ));
 
-        let mut no_arm64 = payload();
-        no_arm64["arch"] = json!("x86_64");
-        assert!(matches!(verify(no_arm64), Err(ManifestError::Schema(_))));
+        let mut no_target_arch = payload();
+        // 与本构建目标不一致的架构必须被拒绝
+        no_target_arch["arch"] = json!(if expected_manifest_arch() == "arm64" {
+            "x86_64"
+        } else {
+            "arm64"
+        });
+        assert!(matches!(
+            verify(no_target_arch),
+            Err(ManifestError::Schema(_))
+        ));
     }
 
     #[test]
@@ -618,7 +671,14 @@ mod tests {
         manifest_bytes.fill(b'x');
         key_bundle_bytes.fill(b'y');
 
-        assert_eq!(provenance.manifest().package_id, "data-scientist-community-mac-arm64");
+        assert_eq!(
+            provenance.manifest().package_id,
+            format!(
+                "data-scientist-community-{}-{}",
+                if cfg!(windows) { "win" } else { "mac" },
+                expected_manifest_arch()
+            )
+        );
         assert_eq!(provenance.signed_bytes(), expected_manifest_bytes);
         assert_eq!(provenance.key_bundle_bytes(), expected_key_bundle_bytes);
         let cloned = provenance.clone();

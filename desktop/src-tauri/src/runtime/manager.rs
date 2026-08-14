@@ -2,7 +2,7 @@ use std::{
     collections::{HashMap, HashSet},
     ffi::CString,
     fs::File,
-    io::{self, Read, Write},
+    io,
     path::{Path, PathBuf},
     str,
     sync::{
@@ -12,6 +12,8 @@ use std::{
     thread,
     time::Duration,
 };
+#[cfg(unix)]
+use std::io::{Read, Write};
 
 use fs2::FileExt;
 use serde::{Deserialize, Serialize};
@@ -28,6 +30,13 @@ use super::{
     state::{self, RuntimeKind, RuntimeState},
 };
 
+/// 目录句柄：Unix 持有打开的 fd（锚定防替换），Windows 为校验过的路径
+/// （std 无法持有目录句柄，依赖唯一临时名 + rename 保证原子性）。
+#[cfg(unix)]
+type DirHandle = File;
+#[cfg(windows)]
+type DirHandle = PathBuf;
+
 const LOCK_POLL: Duration = Duration::from_millis(25);
 const MAX_METADATA_BYTES: usize = 2 * 1024 * 1024;
 const MAX_CLEANUP_DEPTH: usize = 256;
@@ -38,11 +47,14 @@ pub struct RuntimeResolution {
     version: String,
     root: PathBuf,
     used_fallback: bool,
+    #[cfg(unix)]
     directory: Arc<File>,
+    #[cfg(unix)]
     identity: (u64, u64),
 }
 
 impl RuntimeResolution {
+    #[cfg(unix)]
     fn from_verified_directory(
         kind: RuntimeKind,
         version: String,
@@ -66,6 +78,26 @@ impl RuntimeResolution {
         })
     }
 
+    /// Windows：以路径构造（is_dir 校验，无 fd/inode 身份）。
+    #[cfg(windows)]
+    fn from_verified_directory(
+        kind: RuntimeKind,
+        version: String,
+        root: PathBuf,
+        used_fallback: bool,
+        directory: PathBuf,
+    ) -> Result<Self, String> {
+        if !directory.is_dir() {
+            return Err("runtime_resolution_not_directory".into());
+        }
+        Ok(Self {
+            kind,
+            version,
+            root,
+            used_fallback,
+        })
+    }
+
     pub fn kind(&self) -> RuntimeKind {
         self.kind
     }
@@ -82,17 +114,19 @@ impl RuntimeResolution {
         self.used_fallback
     }
 
+    #[cfg(unix)]
     pub(crate) fn duplicate_directory(&self) -> Result<File, String> {
         rustix::io::dup(&*self.directory)
             .map(File::from)
             .map_err(|error| io::Error::from(error).to_string())
     }
 
+    #[cfg(unix)]
     pub(crate) fn identity(&self) -> (u64, u64) {
         self.identity
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, unix))]
     pub(crate) fn fixture(
         kind: RuntimeKind,
         version: &str,
@@ -132,6 +166,26 @@ struct RuntimeGates {
 
 type GateIdentity = (u64, u64);
 
+/// 进程内门禁注册键：Unix 用 (st_dev, st_ino)，Windows 用规范化路径哈希。
+#[cfg(unix)]
+fn directory_identity(directory: &File) -> Result<(u64, u64), String> {
+    let stat =
+        rustix::fs::fstat(directory).map_err(|error| io::Error::from(error).to_string())?;
+    Ok((stat.st_dev as u64, stat.st_ino as u64))
+}
+
+#[cfg(windows)]
+fn directory_identity(directory: &Path) -> Result<(u64, u64), String> {
+    use std::hash::{Hash, Hasher};
+
+    let canonical =
+        std::fs::canonicalize(directory).map_err(|error| error.to_string())?;
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    canonical.hash(&mut hasher);
+    let value = hasher.finish();
+    Ok((value, value))
+}
+
 fn shared_gates(identity: GateIdentity) -> Result<Arc<RuntimeGates>, String> {
     static REGISTRY: OnceLock<StdMutex<HashMap<GateIdentity, Weak<RuntimeGates>>>> =
         OnceLock::new();
@@ -154,10 +208,10 @@ pub struct RuntimeManager {
     resource_root: PathBuf,
     manifest: Arc<VerifiedPackageManifest>,
     faults: FaultInjection,
-    runtimes: Arc<File>,
-    core: Arc<File>,
-    collector: Arc<File>,
-    locks: Arc<File>,
+    runtimes: Arc<DirHandle>,
+    core: Arc<DirHandle>,
+    collector: Arc<DirHandle>,
+    locks: Arc<DirHandle>,
     gates: Arc<RuntimeGates>,
     cancellation: Arc<AtomicBool>,
 }
@@ -165,13 +219,15 @@ pub struct RuntimeManager {
 enum CurrentVersion {
     Absent,
     Invalid,
-    Valid(File),
+    Valid(DirHandle),
 }
 
+#[cfg(unix)]
 fn same_identity(left: &rustix::fs::Stat, right: &rustix::fs::Stat) -> bool {
     left.st_dev == right.st_dev && left.st_ino == right.st_ino
 }
 
+#[cfg(unix)]
 fn open_directory(path: &Path) -> Result<File, String> {
     use rustix::fs::{fstat, open, FileType, Mode, OFlags};
 
@@ -188,6 +244,17 @@ fn open_directory(path: &Path) -> Result<File, String> {
     Ok(File::from(fd))
 }
 
+/// Windows：拒绝符号链接后返回目录路径。
+#[cfg(windows)]
+fn open_directory(path: &Path) -> Result<PathBuf, String> {
+    let metadata = std::fs::symlink_metadata(path).map_err(|error| error.to_string())?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err("runtime_directory_invalid".into());
+    }
+    Ok(path.to_path_buf())
+}
+
+#[cfg(unix)]
 fn open_child_directory(parent: &File, name: &str) -> Result<File, String> {
     use rustix::fs::{fstat, openat, FileType, Mode, OFlags};
 
@@ -205,6 +272,12 @@ fn open_child_directory(parent: &File, name: &str) -> Result<File, String> {
     Ok(File::from(fd))
 }
 
+#[cfg(windows)]
+fn open_child_directory(parent: &Path, name: &str) -> Result<PathBuf, String> {
+    open_directory(&parent.join(name)).map_err(|_| format!("runtime_directory_invalid:{name}"))
+}
+
+#[cfg(unix)]
 fn ensure_child_directory(parent: &File, name: &str) -> Result<File, String> {
     use rustix::fs::{mkdirat, Mode};
 
@@ -214,16 +287,44 @@ fn ensure_child_directory(parent: &File, name: &str) -> Result<File, String> {
     }
 }
 
-fn stat_optional(parent: &File, name: &str) -> Result<Option<rustix::fs::Stat>, String> {
-    use rustix::fs::{statat, AtFlags};
+#[cfg(windows)]
+fn ensure_child_directory(parent: &Path, name: &str) -> Result<PathBuf, String> {
+    let child = parent.join(name);
+    std::fs::create_dir_all(&child).map_err(|error| error.to_string())?;
+    open_directory(&child)
+}
+
+/// 目录条目存在性与类型探测（Unix 用 statat；Windows 用 symlink_metadata）。
+#[derive(Clone, Copy)]
+struct EntryStat {
+    is_dir: bool,
+}
+
+#[cfg(unix)]
+fn stat_optional(parent: &File, name: &str) -> Result<Option<EntryStat>, String> {
+    use rustix::fs::{statat, AtFlags, FileType};
 
     match statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
-        Ok(stat) => Ok(Some(stat)),
+        Ok(stat) => Ok(Some(EntryStat {
+            is_dir: FileType::from_raw_mode(stat.st_mode) == FileType::Directory,
+        })),
         Err(rustix::io::Errno::NOENT) => Ok(None),
         Err(error) => Err(io::Error::from(error).to_string()),
     }
 }
 
+#[cfg(windows)]
+fn stat_optional(parent: &Path, name: &str) -> Result<Option<EntryStat>, String> {
+    match std::fs::symlink_metadata(parent.join(name)) {
+        Ok(metadata) => Ok(Some(EntryStat {
+            is_dir: metadata.is_dir(),
+        })),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error.to_string()),
+    }
+}
+
+#[cfg(unix)]
 fn read_regular_file(parent: &File, name: &str) -> Result<Vec<u8>, String> {
     use rustix::fs::{fstat, openat, FileType, Mode, OFlags};
 
@@ -253,6 +354,17 @@ fn read_regular_file(parent: &File, name: &str) -> Result<Vec<u8>, String> {
     Ok(bytes)
 }
 
+#[cfg(windows)]
+fn read_regular_file(parent: &Path, name: &str) -> Result<Vec<u8>, String> {
+    let path = parent.join(name);
+    let metadata = std::fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
+    if !metadata.is_file() || metadata.len() > MAX_METADATA_BYTES as u64 {
+        return Err(format!("runtime_metadata_invalid:{name}"));
+    }
+    std::fs::read(&path).map_err(|error| error.to_string())
+}
+
+#[cfg(unix)]
 fn write_exclusive_file(parent: &File, name: &str, bytes: &[u8]) -> Result<(), String> {
     use rustix::fs::{fchmod, openat, Mode, OFlags};
 
@@ -275,6 +387,92 @@ fn write_exclusive_file(parent: &File, name: &str, bytes: &[u8]) -> Result<(), S
     file.sync_all().map_err(|error| error.to_string())
 }
 
+/// Windows：唯一临时名 + rename 的原子写（目标已存在则失败）。
+#[cfg(windows)]
+fn write_exclusive_file(parent: &Path, name: &str, bytes: &[u8]) -> Result<(), String> {
+    let target = parent.join(name);
+    if target.exists() {
+        return Err(format!("runtime_metadata_exists:{name}"));
+    }
+    let staging = parent.join(format!(".{}-{}", name, Uuid::new_v4()));
+    std::fs::write(&staging, bytes).map_err(|error| error.to_string())?;
+    match std::fs::rename(&staging, &target) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = std::fs::remove_file(&staging);
+            Err(error.to_string())
+        }
+    }
+}
+
+/// 列出目录直接子项名（Unix 用 Dir::read_from；Windows 用 read_dir）。
+fn child_names(directory: &DirHandle) -> Result<Vec<CString>, String> {
+    #[cfg(unix)]
+    {
+        use rustix::fs::Dir;
+
+        let mut names = Vec::new();
+        for item in
+            Dir::read_from(directory).map_err(|error| io::Error::from(error).to_string())?
+        {
+            let item = item.map_err(|error| io::Error::from(error).to_string())?;
+            if !matches!(item.file_name().to_bytes(), b"." | b"..") {
+                names.push(item.file_name().to_owned());
+            }
+        }
+        Ok(names)
+    }
+    #[cfg(windows)]
+    {
+        let mut names = Vec::new();
+        for item in std::fs::read_dir(directory).map_err(|error| error.to_string())? {
+            let item = item.map_err(|error| error.to_string())?;
+            let name = item.file_name().into_string().map_err(|_| {
+                "runtime_cleanup_name_invalid".to_string()
+            })?;
+            names.push(CString::new(name).map_err(|_| "runtime_cleanup_name_invalid".to_string())?);
+        }
+        Ok(names)
+    }
+}
+
+/// renameat NOREPLACE 的跨平台等价：目标存在则失败。
+/// Windows 的目录 rename 本身不覆盖已存在目标，语义一致。
+fn rename_noreplace(
+    parent: &DirHandle,
+    from: &str,
+    to: &str,
+) -> Result<(), io::Error> {
+    #[cfg(unix)]
+    {
+        use rustix::fs::{renameat_with, RenameFlags};
+        renameat_with(parent, from, parent, to, RenameFlags::NOREPLACE)
+            .map_err(io::Error::from)
+    }
+    #[cfg(windows)]
+    {
+        let target = parent.join(to);
+        if target.symlink_metadata().is_ok() {
+            return Err(io::Error::new(io::ErrorKind::AlreadyExists, to));
+        }
+        std::fs::rename(parent.join(from), &target)
+    }
+}
+
+/// 目录 fsync（Windows 无等价语义，直接成功）。
+fn sync_dir(directory: &DirHandle) -> Result<(), io::Error> {
+    #[cfg(unix)]
+    {
+        rustix::fs::fsync(directory).map_err(io::Error::from)
+    }
+    #[cfg(windows)]
+    {
+        let _ = directory;
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
 fn remove_directory_contents(
     directory: &File,
     cancellation: &AtomicBool,
@@ -333,6 +531,34 @@ fn remove_directory_contents(
     Ok(())
 }
 
+/// Windows：递归删除目录内容（先删子项再交由调用方删目录本身）。
+#[cfg(windows)]
+fn remove_directory_contents(
+    directory: &Path,
+    cancellation: &AtomicBool,
+    depth: usize,
+) -> Result<(), String> {
+    if depth > MAX_CLEANUP_DEPTH {
+        return Err("runtime_cleanup_depth".into());
+    }
+    for entry in std::fs::read_dir(directory).map_err(|error| error.to_string())? {
+        if cancellation.load(Ordering::Acquire) {
+            return Err("runtime_cancelled".into());
+        }
+        let entry = entry.map_err(|error| error.to_string())?;
+        let path = entry.path();
+        let metadata = std::fs::symlink_metadata(&path).map_err(|error| error.to_string())?;
+        if metadata.is_dir() {
+            remove_directory_contents(&path, cancellation, depth + 1)?;
+            std::fs::remove_dir(&path).map_err(|error| error.to_string())?;
+        } else {
+            std::fs::remove_file(&path).map_err(|error| error.to_string())?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 fn remove_name_if_present(
     parent: &File,
     name: &str,
@@ -340,8 +566,10 @@ fn remove_name_if_present(
 ) -> Result<(), String> {
     use rustix::fs::{fstat, openat, statat, unlinkat, AtFlags, FileType, Mode, OFlags};
 
-    let Some(before) = stat_optional(parent, name)? else {
-        return Ok(());
+    let before = match statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
+        Ok(stat) => stat,
+        Err(rustix::io::Errno::NOENT) => return Ok(()),
+        Err(error) => return Err(io::Error::from(error).to_string()),
     };
     if FileType::from_raw_mode(before.st_mode) == FileType::Directory {
         let fd = openat(
@@ -375,6 +603,25 @@ fn remove_name_if_present(
     Ok(())
 }
 
+#[cfg(windows)]
+fn remove_name_if_present(
+    parent: &Path,
+    name: &str,
+    cancellation: &AtomicBool,
+) -> Result<(), String> {
+    let Some(stat) = stat_optional(parent, name)? else {
+        return Ok(());
+    };
+    let target = parent.join(name);
+    if stat.is_dir {
+        remove_directory_contents(&target, cancellation, 0)?;
+        std::fs::remove_dir(&target).map_err(|error| error.to_string())?;
+    } else {
+        std::fs::remove_file(&target).map_err(|error| error.to_string())?;
+    }
+    Ok(())
+}
+
 fn classify_failed_install(
     primary: String,
     cleanup: Result<(), String>,
@@ -397,14 +644,12 @@ impl RuntimeManager {
     ) -> Result<Self, String> {
         let state = open_directory(&state_root)?;
         let runtimes = ensure_child_directory(&state, "runtimes")?;
-        let identity =
-            rustix::fs::fstat(&runtimes).map_err(|error| io::Error::from(error).to_string())?;
-        let gates = shared_gates((identity.st_dev as u64, identity.st_ino as u64))?;
+        let gates = shared_gates(directory_identity(&runtimes)?)?;
         let core = ensure_child_directory(&runtimes, "core")?;
         let collector = ensure_child_directory(&runtimes, "collector")?;
         let locks = ensure_child_directory(&runtimes, ".locks")?;
-        rustix::fs::fsync(&runtimes).map_err(|error| io::Error::from(error).to_string())?;
-        rustix::fs::fsync(&state).map_err(|error| io::Error::from(error).to_string())?;
+        sync_dir(&runtimes).map_err(|error| error.to_string())?;
+        sync_dir(&state).map_err(|error| error.to_string())?;
         Ok(Self {
             state_root,
             resource_root,
@@ -456,7 +701,7 @@ impl RuntimeManager {
         }
     }
 
-    fn kind_directory(&self, kind: RuntimeKind) -> &File {
+    fn kind_directory(&self, kind: RuntimeKind) -> &DirHandle {
         match kind {
             RuntimeKind::Core => &self.core,
             RuntimeKind::Collector => &self.collector,
@@ -490,23 +735,42 @@ impl RuntimeManager {
     }
 
     fn acquire_lock(&self, name: &str) -> Result<File, String> {
-        use rustix::fs::{fchmod, fstat, openat, FileType, Mode, OFlags};
-
         self.check_cancelled()?;
-        let fd = openat(
-            &self.locks,
-            name,
-            OFlags::RDWR | OFlags::CREATE | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC,
-            Mode::from_raw_mode(0o600),
-        )
-        .map_err(|error| io::Error::from(error).to_string())?;
-        let file = File::from(fd);
-        let stat = fstat(&file).map_err(|error| io::Error::from(error).to_string())?;
-        if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
-            return Err("runtime_lock_invalid".into());
-        }
-        fchmod(&file, Mode::from_raw_mode(0o600))
+        #[cfg(unix)]
+        let file = {
+            use rustix::fs::{fchmod, fstat, openat, FileType, Mode, OFlags};
+            let fd = openat(
+                &self.locks,
+                name,
+                OFlags::RDWR
+                    | OFlags::CREATE
+                    | OFlags::NOFOLLOW
+                    | OFlags::NONBLOCK
+                    | OFlags::CLOEXEC,
+                Mode::from_raw_mode(0o600),
+            )
             .map_err(|error| io::Error::from(error).to_string())?;
+            let file = File::from(fd);
+            let stat = fstat(&file).map_err(|error| io::Error::from(error).to_string())?;
+            if FileType::from_raw_mode(stat.st_mode) != FileType::RegularFile {
+                return Err("runtime_lock_invalid".into());
+            }
+            fchmod(&file, Mode::from_raw_mode(0o600))
+                .map_err(|error| io::Error::from(error).to_string())?;
+            file
+        };
+        #[cfg(windows)]
+        let file = {
+            use std::fs::OpenOptions;
+            let path = self.locks.join(name);
+            OpenOptions::new()
+                .read(true)
+                .write(true)
+                .create(true)
+                .truncate(false)
+                .open(&path)
+                .map_err(|error| error.to_string())?
+        };
         loop {
             self.check_cancelled()?;
             match FileExt::try_lock_exclusive(&file) {
@@ -528,26 +792,42 @@ impl RuntimeManager {
         }
     }
 
+    fn load_state_at(&self) -> Result<RuntimeState, String> {
+        #[cfg(unix)]
+        {
+            state::load_at(&self.runtimes).map_err(|error| error.to_string())
+        }
+        #[cfg(windows)]
+        {
+            state::load_at(self.runtimes.as_path()).map_err(|error| error.to_string())
+        }
+    }
+
     fn load_state(&self) -> Result<RuntimeState, String> {
         let _in_process = self.acquire_state_gate()?;
         let _lock = self.acquire_lock("state.lock")?;
-        state::load_at(&self.runtimes).map_err(|error| error.to_string())
+        self.load_state_at()
     }
 
     fn persist_active(&self, kind: RuntimeKind, version: &str) -> Result<RuntimeState, String> {
         let _in_process = self.acquire_state_gate()?;
         let _lock = self.acquire_lock("state.lock")?;
-        let mut current = state::load_at(&self.runtimes).map_err(|error| error.to_string())?;
+        let mut current = self.load_state_at()?;
         current
             .advance(kind, version)
             .map_err(|error| error.to_string())?;
-        state::save_at(&self.runtimes, &current).map_err(|error| error.to_string())?;
+        #[cfg(unix)]
+        let saved = state::save_at(&self.runtimes, &current).map_err(|error| error.to_string());
+        #[cfg(windows)]
+        let saved =
+            state::save_at(self.runtimes.as_path(), &current).map_err(|error| error.to_string());
+        saved?;
         Ok(current)
     }
 
     fn signed_descriptor_at(
         &self,
-        root: &File,
+        root: &DirHandle,
         kind: RuntimeKind,
     ) -> Result<(VerifiedPackageManifest, RuntimeDescriptor), String> {
         let bytes = read_regular_file(root, RUNTIME_PROVENANCE_NAME)?;
@@ -564,7 +844,7 @@ impl RuntimeManager {
 
     fn verify_version_at(
         &self,
-        root: &File,
+        root: &DirHandle,
         kind: RuntimeKind,
         directory_version: &str,
     ) -> Result<RuntimeDescriptor, String> {
@@ -615,19 +895,11 @@ impl RuntimeManager {
         keep: &HashSet<String>,
         stale_only: bool,
     ) -> Result<(), String> {
-        use rustix::fs::Dir;
-
         let parent = self.kind_directory(kind);
-        let mut names = Vec::new();
-        for item in Dir::read_from(parent).map_err(|error| io::Error::from(error).to_string())? {
-            let item = item.map_err(|error| io::Error::from(error).to_string())?;
-            if !matches!(item.file_name().to_bytes(), b"." | b"..") {
-                names.push(item.file_name().to_owned());
-            }
-        }
+        let names = child_names(parent)?;
         for name in names {
             self.check_cancelled()?;
-            let utf8 = str::from_utf8(name.to_bytes()).ok();
+            let utf8 = str::from_utf8(name.as_bytes()).ok();
             if utf8.is_some_and(|value| keep.contains(value)) {
                 continue;
             }
@@ -636,14 +908,11 @@ impl RuntimeManager {
             if stale_only && !stale {
                 continue;
             }
-            let name = CString::new(name.to_bytes())
-                .map_err(|_| "runtime_cleanup_name_invalid".to_string())?;
-            remove_name_if_present(
-                parent,
-                name.to_str()
-                    .map_err(|_| "runtime_cleanup_name_invalid".to_string())?,
-                &self.cancellation,
-            )?;
+            let name = match name.into_string() {
+                Ok(name) => name,
+                Err(_) => return Err("runtime_cleanup_name_invalid".to_string()),
+            };
+            remove_name_if_present(parent, &name, &self.cancellation)?;
         }
         Ok(())
     }
@@ -663,45 +932,28 @@ impl RuntimeManager {
         kind: RuntimeKind,
         version: &str,
     ) -> Result<Option<String>, String> {
-        use rustix::fs::{fsync, renameat_with, RenameFlags};
-
         let parent = self.kind_directory(kind);
         if stat_optional(parent, version)?.is_none() {
             return Ok(None);
         }
         let quarantine = format!(".quarantine-{version}-{}", Uuid::new_v4());
-        renameat_with(
-            parent,
-            version,
-            parent,
-            quarantine.as_str(),
-            RenameFlags::NOREPLACE,
-        )
-        .map_err(|error| io::Error::from(error).to_string())?;
-        if let Err(sync_error) = fsync(parent) {
-            let restore = renameat_with(
-                parent,
-                quarantine.as_str(),
-                parent,
-                version,
-                RenameFlags::NOREPLACE,
-            );
-            let restore_sync = fsync(parent);
+        rename_noreplace(parent, version, &quarantine).map_err(|error| error.to_string())?;
+        if let Err(sync_error) = sync_dir(parent) {
+            let restore = rename_noreplace(parent, &quarantine, version);
+            let restore_sync = sync_dir(parent);
             if let Err(restore) = restore {
                 return Err(format!(
                     "{}; runtime_restore_failed:{}",
-                    io::Error::from(sync_error),
-                    io::Error::from(restore)
+                    sync_error, restore
                 ));
             }
             if let Err(restore_sync) = restore_sync {
                 return Err(format!(
                     "{}; runtime_restore_sync_failed:{}",
-                    io::Error::from(sync_error),
-                    io::Error::from(restore_sync)
+                    sync_error, restore_sync
                 ));
             }
-            return Err(io::Error::from(sync_error).to_string());
+            return Err(sync_error.to_string());
         }
         Ok(Some(quarantine))
     }
@@ -713,8 +965,6 @@ impl RuntimeManager {
         descriptor: &RuntimeDescriptor,
         replace_invalid: bool,
     ) -> Result<(), String> {
-        use rustix::fs::{fsync, renameat_with, RenameFlags};
-
         let parent = self.kind_directory(kind);
         let staging_root = open_child_directory(parent, staging)?;
         let marker = serde_json::to_vec(&Self::marker_for(kind, descriptor, &self.manifest))
@@ -725,7 +975,7 @@ impl RuntimeManager {
             RUNTIME_PROVENANCE_NAME,
             self.manifest.signed_bytes(),
         )?;
-        fsync(&staging_root).map_err(|error| io::Error::from(error).to_string())?;
+        sync_dir(&staging_root).map_err(|error| error.to_string())?;
         let verified = self.verify_version_at(&staging_root, kind, &descriptor.version)?;
         if verified != *descriptor {
             return Err("runtime_staging_descriptor_mismatch".into());
@@ -737,77 +987,51 @@ impl RuntimeManager {
         } else {
             None
         };
-        let publish = renameat_with(
-            parent,
-            staging,
-            parent,
-            descriptor.version.as_str(),
-            RenameFlags::NOREPLACE,
-        );
+        let publish = rename_noreplace(parent, staging, &descriptor.version);
         if let Err(error) = publish {
             if let Some(quarantine) = &quarantine {
-                let restore = renameat_with(
-                    parent,
-                    quarantine.as_str(),
-                    parent,
-                    descriptor.version.as_str(),
-                    RenameFlags::NOREPLACE,
-                );
+                let restore =
+                    rename_noreplace(parent, quarantine, &descriptor.version);
                 if let Err(restore) = restore {
                     return Err(format!(
                         "{}; runtime_restore_failed:{}",
-                        io::Error::from(error),
-                        io::Error::from(restore)
+                        error, restore
                     ));
                 }
             }
-            if let Err(sync) = fsync(parent) {
+            if let Err(sync) = sync_dir(parent) {
                 return Err(format!(
                     "{}; runtime_restore_sync_failed:{}",
-                    io::Error::from(error),
-                    io::Error::from(sync)
+                    error, sync
                 ));
             }
-            return Err(io::Error::from(error).to_string());
+            return Err(error.to_string());
         }
-        if let Err(sync_error) = fsync(parent) {
-            let rollback = renameat_with(
-                parent,
-                descriptor.version.as_str(),
-                parent,
-                staging,
-                RenameFlags::NOREPLACE,
-            );
+        if let Err(sync_error) = sync_dir(parent) {
+            let rollback = rename_noreplace(parent, &descriptor.version, staging);
             if let Err(rollback) = rollback {
                 return Err(format!(
                     "{}; runtime_publish_rollback_failed:{}",
-                    io::Error::from(sync_error),
-                    io::Error::from(rollback)
+                    sync_error, rollback
                 ));
             }
             if let Some(quarantine) = &quarantine {
-                if let Err(restore) = renameat_with(
-                    parent,
-                    quarantine.as_str(),
-                    parent,
-                    descriptor.version.as_str(),
-                    RenameFlags::NOREPLACE,
-                ) {
+                if let Err(restore) =
+                    rename_noreplace(parent, quarantine, &descriptor.version)
+                {
                     return Err(format!(
                         "{}; runtime_restore_failed:{}",
-                        io::Error::from(sync_error),
-                        io::Error::from(restore)
+                        sync_error, restore
                     ));
                 }
             }
-            if let Err(restore_sync) = fsync(parent) {
+            if let Err(restore_sync) = sync_dir(parent) {
                 return Err(format!(
                     "{}; runtime_restore_sync_failed:{}",
-                    io::Error::from(sync_error),
-                    io::Error::from(restore_sync)
+                    sync_error, restore_sync
                 ));
             }
-            return Err(io::Error::from(sync_error).to_string());
+            return Err(sync_error.to_string());
         }
         Ok(())
     }
@@ -833,15 +1057,28 @@ impl RuntimeManager {
         }
         let staging = format!("{}.tmp-{}", descriptor.version, Uuid::new_v4());
         let archive_path = self.resource_root.join(&descriptor.archive);
-        let result = archive::extract_verified_at(
-            &archive_path,
-            descriptor,
-            self.kind_directory(kind),
-            &staging,
-            &self.cancellation,
-        )
-        .map_err(|error| error.to_string())
-        .and_then(|_| self.publish_staging(kind, &staging, descriptor, replace_invalid));
+        #[cfg(unix)]
+        let extracted =
+            archive::extract_verified_at(
+                &archive_path,
+                descriptor,
+                self.kind_directory(kind),
+                &staging,
+                &self.cancellation,
+            )
+            .map_err(|error| error.to_string());
+        #[cfg(windows)]
+        let extracted =
+            archive::extract_verified_at(
+                &archive_path,
+                descriptor,
+                self.kind_directory(kind).as_path(),
+                &staging,
+                &self.cancellation,
+            )
+            .map_err(|error| error.to_string());
+        let result =
+            extracted.and_then(|_| self.publish_staging(kind, &staging, descriptor, replace_invalid));
         if let Err(primary) = result {
             let cleanup = self.cleanup_failed_staging(kind, &staging);
             return Err(classify_failed_install(
@@ -1007,7 +1244,7 @@ impl RuntimeManager {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use std::{
         fs::{self, File},
