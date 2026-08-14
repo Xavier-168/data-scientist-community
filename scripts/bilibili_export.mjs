@@ -185,6 +185,67 @@ function workCardKey(card) {
   return `${normalizeBilibiliTitle(card.title)}|${normalizePublishKey(card.publishText)}`;
 }
 
+export function classifyBilibiliTargetDiscovery({
+  responseShapeOk = true,
+  rawWorks = 0,
+  acceptedWorks = 0,
+  invalidWorks = 0,
+  outsideDateWorks = 0,
+} = {}) {
+  if (acceptedWorks > 0) return 'ok';
+  if (!responseShapeOk) return 'response_shape_changed';
+  if (rawWorks <= 0) return 'api_empty';
+  if (invalidWorks >= rawWorks) return 'unparseable_items';
+  if (outsideDateWorks >= Math.max(1, rawWorks - invalidWorks)) return 'outside_date_range';
+  return 'no_eligible_items';
+}
+
+export function buildBilibiliOfficialFallbackTargets(cards, {
+  minDate = '',
+  maxDate = '',
+  videoLimit = 0,
+} = {}) {
+  const minTs = parseDateValue(minDate);
+  const maxTs = parseDateValue(maxDate);
+  const worksByKey = new Map();
+
+  for (const card of Array.isArray(cards) ? cards : []) {
+    const title = normalizeBilibiliTitle(card?.title || '');
+    const publishText = formatDate(card?.publishText) || '';
+    const publishTs = Number(card?.publishTs) || parseChineseDateTime(card?.publishText);
+    if (!title || !publishText || !publishTs) continue;
+
+    const dayTs = startOfLocalDay(publishTs);
+    if (minTs && dayTs < startOfLocalDay(minTs)) continue;
+    if (maxTs && dayTs > startOfLocalDay(maxTs)) continue;
+
+    const normalized = {
+      ...card,
+      targetId: String(card?.targetId || `official:${title}|${publishText}`),
+      title,
+      publishText,
+      publishTs,
+      bvid: String(card?.bvid || '').trim(),
+      aid: String(card?.aid || '').trim(),
+    };
+    worksByKey.set(workCardKey(normalized), normalized);
+  }
+
+  const works = Array.from(worksByKey.values())
+    .sort((left, right) => (right.publishTs || 0) - (left.publishTs || 0));
+  return videoLimit > 0 ? works.slice(0, videoLimit) : works;
+}
+
+export function shouldStopBilibiliOfficialFallbackScroll({
+  scrollChanged = true,
+  atBottom = false,
+  reachedDateBoundary = false,
+  stableRounds = 0,
+} = {}) {
+  if (reachedDateBoundary && stableRounds >= 2) return true;
+  return (!scrollChanged || atBottom) && stableRounds >= 2;
+}
+
 function coverageKey(title, publishText) {
   return `${normalizeBilibiliTitle(title)}|${normalizePublishKey(publishText)}`;
 }
@@ -844,8 +905,16 @@ async function listTargetWorksByApi(page) {
 
   const worksByKey = new Map();
   const minTs = parseDateValue(CONFIG.minPublishDate);
+  const diagnostics = {
+    responseShapeOk: true,
+    pagesRequested: 0,
+    rawWorks: 0,
+    invalidWorks: 0,
+    outsideDateWorks: 0,
+  };
 
   for (let pageNo = 1; pageNo <= 200; pageNo += 1) {
+    diagnostics.pagesRequested += 1;
     await sleep(CONFIG.requestGapMs + Math.floor(Math.random() * 120));
     const query = buildWbiQuery(
       {
@@ -858,8 +927,13 @@ async function listTargetWorksByApi(page) {
       subKey,
     );
     const payload = await fetchJson(page.request, `${CONFIG.wbiArcSearchBase}?${query}`);
-    const list = payload?.data?.list?.vlist || payload?.data?.list?.vList || [];
-    if (!Array.isArray(list) || list.length === 0) break;
+    const list = payload?.data?.list?.vlist ?? payload?.data?.list?.vList;
+    if (!Array.isArray(list)) {
+      diagnostics.responseShapeOk = false;
+      break;
+    }
+    if (list.length === 0) break;
+    diagnostics.rawWorks += list.length;
 
     let oldestPageTs = null;
     for (const item of list) {
@@ -877,8 +951,14 @@ async function listTargetWorksByApi(page) {
         bvid: String(item?.bvid || item?.bvid_str || '').trim(),
         aid: String(item?.aid || '').trim(),
       };
-      if (!card.title || !card.publishText || !card.publishTs) continue;
-      if (!meetsDateRangeFromTs(card.publishTs)) continue;
+      if (!card.title || !card.publishText || !card.publishTs) {
+        diagnostics.invalidWorks += 1;
+        continue;
+      }
+      if (!meetsDateRangeFromTs(card.publishTs)) {
+        diagnostics.outsideDateWorks += 1;
+        continue;
+      }
       worksByKey.set(workCardKey(card), card);
     }
 
@@ -898,10 +978,17 @@ async function listTargetWorksByApi(page) {
 
   const works = Array.from(worksByKey.values()).sort((left, right) => (right.publishTs || 0) - (left.publishTs || 0));
   const limitedWorks = CONFIG.videoLimit > 0 ? works.slice(0, CONFIG.videoLimit) : works;
-  if (limitedWorks.length <= 0) {
-    throw new Error(`B 站接口未返回符合日期范围的稿件（日期范围：${CONFIG.minPublishDate || '不限'} - ${CONFIG.maxPublishDate || '不限'}）`);
-  }
-  return limitedWorks;
+  return {
+    works: limitedWorks,
+    diagnostics: {
+      ...diagnostics,
+      acceptedWorks: limitedWorks.length,
+      reason: classifyBilibiliTargetDiscovery({
+        ...diagnostics,
+        acceptedWorks: limitedWorks.length,
+      }),
+    },
+  };
 }
 
 async function readSelectedWorkCount(frame) {
@@ -963,7 +1050,13 @@ async function getVisibleWorkCards(frame) {
       const cardText = card.innerText || '';
       const publishText = (cardText.match(datePattern) || [])[0] || '';
       if (!publishText) continue;
-      const title = cardText
+      const titleNode = card.querySelector(
+        '.arcp-archive-title, [class*="archive-title"], [class*="archive-name"]',
+      );
+      const title = String(titleNode?.innerText || titleNode?.textContent || '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 120) || cardText
         .replace(publishText, '')
         .replace(/\d+:\d{2}/g, '')
         .replace(/\s+/g, ' ')
@@ -1045,7 +1138,13 @@ async function clickWorkCard(frame, targetCard) {
       const text = (card.innerText || '').replace(/\s+/g, ' ');
       const cardPublishText = (text.match(datePattern) || [])[0] || '';
       if (normalizeDate(cardPublishText) !== normalizedTargetDate) continue;
-      const cardTitle = text
+      const titleNode = card.querySelector(
+        '.arcp-archive-title, [class*="archive-title"], [class*="archive-name"]',
+      );
+      const cardTitle = String(titleNode?.innerText || titleNode?.textContent || '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .slice(0, 120) || text
         .replace(cardPublishText, '')
         .replace(/\d+:\d{2}/g, '')
         .replace(/\s+/g, ' ')
@@ -1218,6 +1317,7 @@ async function collectWorksByTargetSet(frame, targetWorks) {
     phase: 'selecting',
     message: `在 B 站稿件弹窗里定位 ${targetWorks.length} 条目标稿件`,
   });
+  await scrollWorkListToTop(frame);
 
   const worksByTargetId = new Map();
   const oldestTargetTs = targetWorks.reduce((min, work) => {
@@ -1288,6 +1388,95 @@ async function collectWorksByTargetSet(frame, targetWorks) {
   return targetWorks.map((work) => worksByTargetId.get(work.targetId) || work);
 }
 
+async function collectWorksByOfficialDateRange(frame, diagnostics = {}) {
+  const reasonLabels = {
+    response_shape_changed: '返回结构变化',
+    api_empty: '返回空列表',
+    unparseable_items: '稿件字段不可解析',
+    outside_date_range: '公开空间稿件均在日期范围外',
+    no_eligible_items: '没有可用目标稿件',
+  };
+  const reasonLabel = reasonLabels[diagnostics.reason] || '未锁定目标稿件';
+  await updateProgress({
+    phase: 'selecting',
+    message: `B 站空间接口${reasonLabel}，改用创作中心稿件列表按日期扫描`,
+  });
+  await scrollWorkListToTop(frame);
+
+  const cardsByKey = new Map();
+  const unparseableCards = new Set();
+  const minTs = parseDateValue(CONFIG.minPublishDate);
+  let stableRounds = 0;
+
+  for (let round = 1; round <= 160; round += 1) {
+    const cards = await getVisibleWorkCards(frame);
+    let newFound = 0;
+    let oldestVisibleTs = null;
+
+    for (const card of cards) {
+      const key = `${card.title || ''}|${card.publishText || ''}`;
+      if (!card.publishTs) {
+        if (key !== '|') unparseableCards.add(key);
+        continue;
+      }
+      oldestVisibleTs = oldestVisibleTs === null
+        ? card.publishTs
+        : Math.min(oldestVisibleTs, card.publishTs);
+      const normalizedKey = workCardKey(card);
+      if (!cardsByKey.has(normalizedKey)) {
+        cardsByKey.set(normalizedKey, card);
+        newFound += 1;
+      }
+    }
+
+    if (newFound === 0) stableRounds += 1;
+    else stableRounds = 0;
+
+    const eligibleWorks = buildBilibiliOfficialFallbackTargets(Array.from(cardsByKey.values()), {
+      minDate: CONFIG.minPublishDate,
+      maxDate: CONFIG.maxPublishDate,
+      videoLimit: CONFIG.videoLimit,
+    });
+    await updateProgress({
+      phase: 'selecting',
+      message: `B 站创作中心稿件列表已扫描 ${cardsByKey.size} 条，日期范围内 ${eligibleWorks.length} 条`,
+      totalWorks: eligibleWorks.length,
+      processedWorks: eligibleWorks.length,
+      successWorks: eligibleWorks.length,
+      queuedWorks: 0,
+      currentIndex: eligibleWorks.length,
+    });
+
+    const scrollState = await scrollWorkList(frame);
+    await sleep(700);
+    const reachedBoundary = Boolean(
+      minTs
+      && oldestVisibleTs
+      && startOfLocalDay(oldestVisibleTs) < startOfLocalDay(minTs)
+    );
+    if (shouldStopBilibiliOfficialFallbackScroll({
+      scrollChanged: scrollState.changed,
+      atBottom: scrollState.atBottom,
+      reachedDateBoundary: reachedBoundary,
+      stableRounds,
+    })) break;
+  }
+
+  const works = buildBilibiliOfficialFallbackTargets(Array.from(cardsByKey.values()), {
+    minDate: CONFIG.minPublishDate,
+    maxDate: CONFIG.maxPublishDate,
+    videoLimit: CONFIG.videoLimit,
+  });
+  if (works.length <= 0) {
+    throw new Error(
+      `B 站空间接口${reasonLabel}，创作中心稿件列表也未发现符合日期范围的稿件`
+      + `（日期范围：${CONFIG.minPublishDate || '不限'} - ${CONFIG.maxPublishDate || '不限'}；`
+      + `已扫描 ${cardsByKey.size} 条，可解析失败 ${unparseableCards.size} 条）`,
+    );
+  }
+  return works;
+}
+
 async function confirmTargetsWithOfficialScroll(page, targetWorks) {
   const confirmFrame = await findDataFrame(page, { requireRecent: true });
   await openWorkSelection(confirmFrame);
@@ -1307,29 +1496,56 @@ async function confirmTargetsWithOfficialScroll(page, targetWorks) {
 async function closeWorkSelection(frame) {
   await frame.page().keyboard.press('Escape').catch(() => {});
   await sleep(300);
-  const closed = await frame.evaluate(() => {
+  const closeAttempt = await frame.evaluate(() => {
     const visible = (el) => {
       const rect = el.getBoundingClientRect();
       const style = window.getComputedStyle(el);
       return rect.width > 10 && rect.height > 10 && style.visibility !== 'hidden' && style.display !== 'none';
     };
-    const dialog = Array.from(document.querySelectorAll('[role="dialog"], .bili-modal, .bcc-dialog, .modal, body'))
+    const dialog = Array.from(document.querySelectorAll('[role="dialog"], .bili-modal, .bcc-dialog, .modal'))
       .filter(visible)
-      .find((el) => (el.innerText || '').includes('稿件列表')) || document.body;
-    if (!(document.body.innerText || '').includes('稿件列表')) return true;
-    const cancel = Array.from(dialog.querySelectorAll('button, [role="button"], span, div, i, svg'))
+      .find((el) => (el.innerText || '').includes('稿件列表'));
+    // B 站会把关闭后的弹窗 DOM 留在页面里；只有仍可见的稿件弹窗才需要继续关闭。
+    if (!dialog) return 'already_closed';
+    const explicitClose = Array.from(dialog.querySelectorAll('button, [role="button"], span, div, i, svg'))
       .filter(visible)
       .find((el) => {
         const text = (el.textContent || '').replace(/\s+/g, '').trim();
         const hints = [el.className, el.getAttribute?.('aria-label'), el.getAttribute?.('title')].join(' ').toLowerCase();
         return text === '取消' || text === '关闭' || /\b(close|modal-close|dialog-close)\b/.test(hints);
       });
-    if (!cancel) return false;
-    (cancel.closest('button, [role="button"], [tabindex]') || cancel).click();
-    return true;
+    const confirm = Array.from(dialog.querySelectorAll('.arcp-queue-confirm'))
+      .filter(visible)
+      .find((el) => String(el.className || '').includes('active'));
+    const target = explicitClose || confirm;
+    if (target) {
+      (target.closest('button, [role="button"], [tabindex]') || target).click();
+      return explicitClose ? 'explicit_close' : 'active_confirm';
+    }
+
+    // 无已选稿件时确认按钮不可用；再次点击原“稿件选择”入口可收起选择层。
+    const trigger = Array.from(document.querySelectorAll('button, [role="button"], span, div'))
+      .filter(visible)
+      .filter((el) => !dialog.contains(el))
+      .find((el) => (el.textContent || '').replace(/\s+/g, '').trim() === '稿件选择');
+    if (!trigger) return 'not_found';
+    (trigger.closest('button, [role="button"], [tabindex]') || trigger).click();
+    return 'toggle_trigger';
   });
-  if (!closed) throw new Error('B 站稿件滚动确认完成后未能关闭选择弹窗');
-  await sleep(500);
+  await sleep(700);
+  const stillOpen = await frame.evaluate(() => {
+    const visible = (el) => {
+      const rect = el.getBoundingClientRect();
+      const style = window.getComputedStyle(el);
+      return rect.width > 10 && rect.height > 10 && style.visibility !== 'hidden' && style.display !== 'none';
+    };
+    return Array.from(document.querySelectorAll('[role="dialog"], .bili-modal, .bcc-dialog, .modal'))
+      .filter(visible)
+      .some((el) => (el.innerText || '').includes('稿件列表'));
+  });
+  if (stillOpen) {
+    throw new Error(`B 站稿件滚动确认完成后未能关闭选择弹窗（关闭动作：${closeAttempt}）`);
+  }
 }
 
 async function clearSelectedWorks(frame) {
@@ -1888,17 +2104,39 @@ async function main() {
       return;
     }
 
-    const apiTargets = await listTargetWorksByApi(page);
-    // Fast XHR collection must still be checked against the real official scroll list. Otherwise a
-    // complete API response could hide a broken/changed UI scroll path until the slower CSV fallback.
-    const { confirmed: confirmedTargets, confirmFrame } = await confirmTargetsWithOfficialScroll(page, apiTargets);
+    const targetDiscovery = await listTargetWorksByApi(page);
+    let confirmedTargets;
+    let confirmFrame;
+    let forceOfficialCsvFallback = false;
+
+    if (targetDiscovery.works.length > 0) {
+      // Fast XHR collection must still be checked against the real official scroll list. Otherwise a
+      // complete API response could hide a broken/changed UI scroll path until the slower CSV fallback.
+      ({ confirmed: confirmedTargets, confirmFrame } = await confirmTargetsWithOfficialScroll(page, targetDiscovery.works));
+    } else {
+      confirmFrame = await findDataFrame(page, { requireRecent: true });
+      await openWorkSelection(confirmFrame);
+      confirmedTargets = await collectWorksByOfficialDateRange(confirmFrame, targetDiscovery.diagnostics);
+      forceOfficialCsvFallback = true;
+      await updateProgress({
+        phase: 'selecting',
+        message: `B 站已从创作中心稿件列表锁定 ${confirmedTargets.length} 条，使用官方 CSV 保证完整性`,
+        totalWorks: confirmedTargets.length,
+        processedWorks: confirmedTargets.length,
+        successWorks: confirmedTargets.length,
+        queuedWorks: 0,
+        currentIndex: confirmedTargets.length,
+      });
+    }
 
     // ── 提速模式：优先 XHR 直采（~25 倍提速）────────────────────────────
     // 探测验证：archive_diagnose/compare 接口能直接返回完播率/跳出率/封标点击率
     // 等深度指标的 JSON。成功则跳过整条慢链路（勾自选指标+点导出+等下载+解析CSV）。
     // 失败则自动 fallback 到原 CSV 导出链路，保证稳定性。
     let rowsCount = 0;
-    const xhrResult = await tryXhrCollection(page, confirmedTargets);
+    const xhrResult = forceOfficialCsvFallback
+      ? { ok: false, error: '空间接口目标为空，使用创作中心官方 CSV 链路' }
+      : await tryXhrCollection(page, confirmedTargets);
     const xhrCoveredAll = (() => {
       // 检查 XHR 是否覆盖了 WBI 锁定的全部目标稿件
       // archive_diagnose 接口硬上限 50 条，超出部分 XHR 拿不到，需降级 CSV 补全
