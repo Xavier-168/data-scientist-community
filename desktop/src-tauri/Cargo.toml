@@ -12,7 +12,11 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [features]
+default = []
 test-harness = []
+# 生产模式必需：tauri build / 正式分发通过该 feature 切换到内嵌资源协议，
+# 缺失时 tauri::is_dev() 恒为 true，主窗口会去连 devUrl(127.0.0.1:1420)。
+custom-protocol = ["tauri/custom-protocol"]
 
 [dependencies]
 base64 = "0.22"

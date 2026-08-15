@@ -998,15 +998,21 @@ impl SidecarSupervisor {
         let package = self.manifest.manifest();
         #[cfg(unix)]
         let current_root = view.path().to_path_buf();
-        // Windows：BASE_DIR 是应用负载根（scripts/frontend/node_modules 所在）
+        // Windows：BASE_DIR 是应用负载根（scripts/frontend/node_modules 所在）。
+        // resource_dir 自带 \\?\ 前缀，必须剥离——RUN_SCRIPT 等路径会交给 cmd.exe。
         #[cfg(windows)]
-        let current_root = view.payload_root()?.to_path_buf();
+        let current_root =
+            crate::platform::env_paths::strip_verbatim(&view.payload_root()?.to_path_buf());
         let python_relative = self.python_relative();
         let python = pinned_root.join(python_relative?);
+        // Windows：canonicalize 产生的 \\?\ 前缀会毒害 cmd.exe / node，
+        // 交给子进程的路径一律剥离。
+        #[cfg(windows)]
+        let python = crate::platform::env_paths::strip_verbatim(&python);
         #[cfg(unix)]
         let script = pinned_root.join("scripts/_run.py");
         #[cfg(windows)]
-        let script = current_root.join("scripts/_run.py");
+        let script = crate::platform::env_paths::strip_verbatim(&current_root.join("scripts/_run.py"));
         #[cfg(unix)]
         if !package
             .runtimes
@@ -1024,8 +1030,31 @@ impl SidecarSupervisor {
         }
         #[cfg(unix)]
         let node = current_root.join(self.node_relative()?);
+        // Windows：api 就绪先于 collector 激活，view.node_root() 此时还是
+        // core 包根（collector_root=None）。改从状态目录的 collector 包解析
+        // node；包尚未解包完成时不设 NODE_BIN，PATH 仍带 node 目录，由
+        // runner 侧 shutil.which 在每次拉起采集/授权时懒解析。
         #[cfg(windows)]
-        let node = view.node_root().join(self.node_relative()?);
+        let (node, node_present) = {
+            let relative = self.node_relative()?;
+            let collector_root = crate::platform::env_paths::strip_verbatim(
+                &self
+                    .state_root
+                    .join("runtimes")
+                    .join("collector")
+                    .join(&package.runtimes.collector.version),
+            );
+            let candidate = collector_root.join(&relative);
+            let present = candidate.is_file();
+            if present {
+                (candidate, true)
+            } else {
+                (
+                    crate::platform::env_paths::strip_verbatim(&view.node_root().join(relative)),
+                    false,
+                )
+            }
+        };
         let node_parent = node
             .parent()
             .ok_or_else(|| "sidecar_node_path_invalid".to_string())?
@@ -1109,7 +1138,7 @@ impl SidecarSupervisor {
         #[cfg(unix)]
         let spawn_cwd = pinned_root.clone();
         #[cfg(windows)]
-        let spawn_cwd = current_root.clone();
+        let spawn_cwd = crate::platform::env_paths::strip_verbatim(&current_root);
         let mut command = Command::new(&python);
         command
             .kill_on_drop(true)
@@ -1143,11 +1172,9 @@ impl SidecarSupervisor {
                 "PATH",
                 crate::platform::env_paths::runner_path(node_parent.as_path()),
             )
-            .env("NODE_BIN", &node)
             .env("PYTHONDONTWRITEBYTECODE", "1")
             .env("PYTHONNOUSERSITE", "1")
             .env("YIRENGONGIS_BASE_DIR", &current_root)
-            .env("YIRENGONGIS_STATE_DIR", &self.state_root)
             .env("YIRENGONGIS_RUNNER_HOST", "127.0.0.1")
             .env("YIRENGONGIS_RUNNER_PORT", self.preferred_port.to_string())
             .env("YIRENGONGIS_SESSION_TOKEN", &session_token)
@@ -1155,6 +1182,24 @@ impl SidecarSupervisor {
             .env(OWNER_MARKER_ENV, &instance_id)
             .env("YIRENGONGIS_PACKAGE_ID", &package.package_id)
             .env("YIRENGONGIS_BUILD_VERSION", &package.build_version);
+        // 状态目录同样剥离 \\?\：runner 会把 USER_DATA_DIR / PROGRESS_PATH
+        // 等子路径继续传给 node 与 cmd 子进程。
+        #[cfg(unix)]
+        command
+            .env("NODE_BIN", &node)
+            .env("YIRENGONGIS_STATE_DIR", &self.state_root);
+        #[cfg(windows)]
+        {
+            command.env(
+                "YIRENGONGIS_STATE_DIR",
+                crate::platform::env_paths::strip_verbatim(&self.state_root),
+            );
+            // collector 包可能尚未解包完成；此时不设 NODE_BIN，
+            // 由 runner 通过 PATH（含 node 目录）懒解析。
+            if node_present {
+                command.env("NODE_BIN", &node);
+            }
+        }
         #[cfg(unix)]
         command.as_std_mut().process_group(0);
         #[cfg(windows)]

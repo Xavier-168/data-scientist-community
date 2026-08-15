@@ -1,5 +1,20 @@
 //! 为 runner 子进程构建的最小环境变量。
 
+/// 剥离 `std::fs::canonicalize` 在 Windows 上加的 `\\?\` / `\\?\UNC\` 前缀。
+/// 子进程链（cmd.exe 执行 .cmd、node 的 file URL、PATH 目录）都无法处理
+/// verbatim 前缀路径，交给子进程的路径必须是普通绝对路径。
+#[cfg(windows)]
+pub fn strip_verbatim(path: &std::path::Path) -> std::path::PathBuf {
+    let text = path.as_os_str().to_string_lossy();
+    if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        std::path::PathBuf::from(format!(r"\\{rest}"))
+    } else if let Some(rest) = text.strip_prefix(r"\\?\") {
+        std::path::PathBuf::from(rest.to_string())
+    } else {
+        path.to_path_buf()
+    }
+}
+
 /// sidecar 环境的 PATH：node 目录优先，随后是系统目录。
 /// Unix 用 ':' 与 /usr/bin；Windows 用 ';' 与系统目录。
 pub fn runner_path(node_bin_dir: &std::path::Path) -> std::ffi::OsString {
