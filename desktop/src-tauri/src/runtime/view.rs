@@ -151,6 +151,11 @@ pub struct VerifiedView {
     root: PathBuf,
     #[cfg(windows)]
     collector_root: Option<PathBuf>,
+    /// Windows：应用负载根（resources/：scripts、frontend、node_modules、
+    /// package_manifest.json）。Unix 的 generation 视图把负载与运行时合成为
+    /// 一个目录树；Windows 不做合成，视图同时持有两类根。
+    #[cfg(windows)]
+    payload: PathBuf,
 }
 
 impl VerifiedView {
@@ -258,6 +263,12 @@ impl VerifiedView {
     pub(crate) fn node_root(&self) -> &Path {
         self.collector_root.as_deref().unwrap_or(&self.root)
     }
+
+    /// Windows：应用负载根（BASE_DIR / scripts 所在）。
+    #[cfg(windows)]
+    pub(crate) fn payload_root(&self) -> Result<&Path, String> {
+        Ok(&self.payload)
+    }
 }
 
 impl Deref for VerifiedView {
@@ -333,6 +344,8 @@ pub struct ViewManager {
     gate: Arc<Mutex<()>>,
     // Windows：无 generation 目录、无锁文件；只记录最近一次激活的启动根。
     #[cfg(windows)]
+    payload: PathBuf,
+    #[cfg(windows)]
     active: Arc<Mutex<Option<VerifiedView>>>,
     #[cfg(all(test, unix))]
     fail_switch_sync: Arc<std::sync::atomic::AtomicBool>,
@@ -350,6 +363,7 @@ pub struct ViewManager {
 impl ViewManager {
     pub fn new(
         state_root: PathBuf,
+        payload: PathBuf,
         manifest: Arc<VerifiedPackageManifest>,
     ) -> Result<Self, String> {
         let build_version = manifest.manifest().build_version.clone();
@@ -378,6 +392,7 @@ impl ViewManager {
             }
         }
         Ok(Self {
+            payload,
             gate: Arc::new(Mutex::new(())),
             active: Arc::new(Mutex::new(None)),
         })
@@ -421,6 +436,7 @@ impl ViewManager {
         let view = VerifiedView {
             root,
             collector_root,
+            payload: self.payload.clone(),
         };
         *self
             .active
@@ -1232,6 +1248,7 @@ fn validate_linked_directory_identity(
 impl ViewManager {
     pub fn new(
         state_root: PathBuf,
+        payload: PathBuf,
         manifest: Arc<VerifiedPackageManifest>,
     ) -> Result<Self, String> {
         use rustix::fs::{fchmod, fstat, fsync, openat, FileType, Mode, OFlags};

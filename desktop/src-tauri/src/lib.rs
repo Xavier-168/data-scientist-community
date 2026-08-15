@@ -349,7 +349,7 @@ fn setup_desktop(app: &mut tauri::App, process_started: Instant) -> Result<(), B
         faults.clone(),
     )
     .map_err(std::io::Error::other)?;
-    let views = ViewManager::new(state_root.clone(), Arc::clone(&manifest))
+    let views = ViewManager::new(state_root.clone(), payload.clone(), Arc::clone(&manifest))
         .map_err(std::io::Error::other)?;
     let sidecar = SidecarSupervisor::new(state_root.clone(), Arc::clone(&manifest))
         .map_err(std::io::Error::other)?;
@@ -402,6 +402,8 @@ fn source_app_path() -> Result<PathBuf, Box<dyn Error>> {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let process_started = Instant::now();
+
+
     let app = tauri::Builder::default()
         .invoke_handler(tauri::generate_handler![
             get_startup_snapshot,

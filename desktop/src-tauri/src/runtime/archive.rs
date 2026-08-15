@@ -490,7 +490,8 @@ fn create_verified_snapshot(
     std::fs::remove_file(&temporary)?;
     let mut digest = Sha256::new();
     let mut copied = 0_u64;
-    let mut buffer = [0_u8; 1024 * 1024];
+    // 堆分配缓冲：1MB 栈数组在受限线程（tokio worker 2MB 栈）上会溢出
+    let mut buffer = vec![0_u8; 1024 * 1024];
     loop {
         check_cancelled(cancellation)?;
         let read = source.read(&mut buffer)?;
@@ -899,7 +900,8 @@ fn scan_archive_with_hook<F: FnOnce()>(
     let compressed_size = source.metadata()?.len();
     let mut file = tempfile::tempfile()?;
     let mut copied = 0_u64;
-    let mut buffer = [0_u8; 1024 * 1024];
+    // 堆分配缓冲：1MB 栈数组在受限线程（tokio worker 2MB 栈）上会溢出
+    let mut buffer = vec![0_u8; 1024 * 1024];
     loop {
         check_cancelled(cancellation)?;
         let read = source.read(&mut buffer)?;
@@ -944,7 +946,8 @@ fn verify_open_bytes(
     file.seek(SeekFrom::Start(0))?;
     let mut digest = Sha256::new();
     let mut read_bytes = 0_u64;
-    let mut buffer = [0_u8; 1024 * 1024];
+    // 堆分配缓冲：1MB 栈数组在受限线程（tokio worker 2MB 栈）上会溢出
+    let mut buffer = vec![0_u8; 1024 * 1024];
     loop {
         check_cancelled(cancellation)?;
         let read = file.read(&mut buffer)?;
@@ -1201,7 +1204,8 @@ fn extract_record_at<R: Read>(
                 .create_new(true)
                 .open(&target)?;
             let mut remaining = *size;
-            let mut buffer = [0_u8; 1024 * 1024];
+            // 堆分配缓冲：1MB 栈数组在受限线程（tokio worker 2MB 栈）上会溢出
+            let mut buffer = vec![0_u8; 1024 * 1024];
             while remaining != 0 {
                 check_cancelled(cancellation)?;
                 let maximum = usize::try_from(remaining.min(buffer.len() as u64))
@@ -2340,10 +2344,15 @@ fn is_required_binary_name(name: &str) -> bool {
     )
 }
 
-/// Windows 必需二进制名（清单 required_files 中的解释器/浏览器入口）。
+/// Windows 必需二进制名。仅覆盖解释器入口：
+/// - 冒烟测试只运行 python.exe / node.exe；
+/// - chrome.exe / headless_shell.exe 不参与（Chrome for Testing 在 Windows 上
+///   `--version` 不会快速退出而会拉起完整浏览器组件，且从 AppData 拉起
+///   浏览器可执行文件会触发 Defender 干预，曾导致整个进程冻结）。
+///   浏览器完整性由包级 sha256 + 树哈希保证。
 #[cfg(windows)]
 fn is_required_binary_name(name: &str) -> bool {
-    matches!(name, "python.exe" | "node.exe" | "chrome.exe" | "headless_shell.exe")
+    matches!(name, "python.exe" | "node.exe")
 }
 
 pub fn validate_runtime_tree(root: &Path, required_files: &[String]) -> Result<(), ArchiveError> {
@@ -2457,6 +2466,13 @@ fn validate_runtime_tree_at(
     for (path, record) in &entries {
         check_cancelled(cancellation)?;
         if !matches!(record.kind, LayoutKind::Regular { .. }) {
+            continue;
+        }
+        // 仅对已知主二进制做 PE 架构门禁（与 macOS 的命名门禁对齐）。
+        // 依赖包内可能携带 32 位辅助程序（如 pip 的 distlib/t32.exe），
+        // 它们不是运行时入口，不参与门禁。
+        let name = path.rsplit('/').next().unwrap_or_default();
+        if !is_required_binary_name(name) {
             continue;
         }
         if pe_x86_64_status(open_regular_at(root, path)?)? == Some(false) {
@@ -2601,7 +2617,8 @@ fn runtime_tree_sha256_at(
     let entries = enumerate_tree_at(root, true, cancellation)?;
     ArchiveLayout::from_records(entries.values().map(|record| record.clone()).collect())?;
     let mut digest = Sha256::new();
-    let mut buffer = [0_u8; 1024 * 1024];
+    // 堆分配缓冲：避免受限线程栈溢出
+    let mut buffer = vec![0_u8; 1024 * 1024];
     for (path, record) in entries {
         check_cancelled(cancellation)?;
         let relative = path.as_bytes();

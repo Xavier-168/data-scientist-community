@@ -222,10 +222,6 @@ pub struct SidecarSupervisor {
     watcher_before_cleanup: Arc<std::sync::Mutex<Option<TestHook>>>,
 }
 
-#[cfg(unix)]
-fn same_identity(left: &rustix::fs::Stat, right: &rustix::fs::Stat) -> bool {
-    left.st_dev == right.st_dev && left.st_ino == right.st_ino
-}
 
 /// 目录句柄：Unix 持有 fd（锚定防替换）；Windows 为校验过的路径。
 #[cfg(unix)]
@@ -1000,9 +996,18 @@ impl SidecarSupervisor {
         view.verify_visible()?;
         let pinned_root = view.pinned_launch_root()?;
         let package = self.manifest.manifest();
+        #[cfg(unix)]
         let current_root = view.path().to_path_buf();
-        let python = pinned_root.join(self.python_relative()?);
+        // Windows：BASE_DIR 是应用负载根（scripts/frontend/node_modules 所在）
+        #[cfg(windows)]
+        let current_root = view.payload_root()?.to_path_buf();
+        let python_relative = self.python_relative();
+        let python = pinned_root.join(python_relative?);
+        #[cfg(unix)]
         let script = pinned_root.join("scripts/_run.py");
+        #[cfg(windows)]
+        let script = current_root.join("scripts/_run.py");
+        #[cfg(unix)]
         if !package
             .runtimes
             .core
@@ -1012,7 +1017,15 @@ impl SidecarSupervisor {
         {
             return Err("sidecar_script_required_file_invalid".into());
         }
+        // Windows：_run.py 在应用负载根（不在 Python 运行时包清单内）
+        #[cfg(windows)]
+        if !script.is_file() {
+            return Err("sidecar_script_required_file_invalid".into());
+        }
+        #[cfg(unix)]
         let node = current_root.join(self.node_relative()?);
+        #[cfg(windows)]
+        let node = view.node_root().join(self.node_relative()?);
         let node_parent = node
             .parent()
             .ok_or_else(|| "sidecar_node_path_invalid".to_string())?
@@ -1092,11 +1105,16 @@ impl SidecarSupervisor {
         };
         #[cfg(not(windows))]
         let job_handle: Option<()> = None;
+        // Unix：generation 视图根；Windows：应用负载根（与 BASE_DIR 一致）
+        #[cfg(unix)]
+        let spawn_cwd = pinned_root.clone();
+        #[cfg(windows)]
+        let spawn_cwd = current_root.clone();
         let mut command = Command::new(&python);
         command
             .kill_on_drop(true)
             .args(&arguments)
-            .current_dir(&pinned_root)
+            .current_dir(&spawn_cwd)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

@@ -906,12 +906,17 @@ mod tests {
         let store = StartupStore::default();
         let runtimes = RuntimeManager::new(
             state_root.clone(),
-            resource_root,
+            resource_root.clone(),
             Arc::clone(&manifest),
             crate::fault_injection::FaultInjection::default(),
         )
         .unwrap();
-        let views = ViewManager::new(state_root.clone(), Arc::clone(&manifest)).unwrap();
+        let views = ViewManager::new(
+            state_root.clone(),
+            resource_root.clone(),
+            Arc::clone(&manifest),
+        )
+        .unwrap();
         let sidecar = SidecarSupervisor::new(state_root.clone(), Arc::clone(&manifest)).unwrap();
         let installer = InstallManager::new(
             temp.path().join("source.app"),

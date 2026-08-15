@@ -36,7 +36,33 @@ pub fn passthrough_env_keys() -> &'static [&'static str] {
     {
         &["__CF_USER_TEXT_ENCODING", "SECURITYSESSIONID"]
     }
-    #[cfg(not(target_os = "macos"))]
+    // Windows：env_clear 后必须透传系统变量——缺 SYSTEMROOT 会导致
+    // Winsock 无法初始化（WinError 10106，socket 绑定失败）；
+    // COMSPEC 供 runner 调起 .cmd 采集包装；APPDATA/LOCALAPPDATA 供
+    // 状态目录与 Playwright 浏览器注册表解析。
+    #[cfg(windows)]
+    {
+        &[
+            "SYSTEMROOT",
+            "SYSTEMDRIVE",
+            "COMSPEC",
+            "PATHEXT",
+            "TEMP",
+            "TMP",
+            "USERNAME",
+            "USERPROFILE",
+            "HOMEDRIVE",
+            "HOMEPATH",
+            "APPDATA",
+            "LOCALAPPDATA",
+            "PROGRAMDATA",
+            "PUBLIC",
+            "ALLUSERSPROFILE",
+            "NUMBER_OF_PROCESSORS",
+            "PROCESSOR_ARCHITECTURE",
+        ]
+    }
+    #[cfg(not(any(target_os = "macos", windows)))]
     {
         &[]
     }
