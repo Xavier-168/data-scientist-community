@@ -489,8 +489,26 @@ impl StartupOrchestrator {
             state.core.message = "核心运行时已就绪".into();
         })
         .await;
-        if let Err(error) = self.sidecar.start(&view).await {
-            self.fail(RetryStage::Sidecar, "sidecar_start_failed", error, false)
+        // 关闭后立即重开时，残留进程清理/端口回收偶发让首次拉起失败；
+        // 这种失败几秒后自愈——自动重试而不是直接进降级态。
+        let mut sidecar_error = String::new();
+        let mut sidecar_started = false;
+        for attempt in 0..3 {
+            if attempt > 0 {
+                tokio::time::sleep(Duration::from_millis(2000)).await;
+            }
+            match self.sidecar.start(&view).await {
+                Ok(_) => {
+                    sidecar_started = true;
+                    break;
+                }
+                Err(error) => {
+                    sidecar_error = error;
+                }
+            }
+        }
+        if !sidecar_started {
+            self.fail(RetryStage::Sidecar, "sidecar_start_failed", sidecar_error, false)
                 .await;
             self.settle_background(Some(&core), true).await;
             self.finish().await;

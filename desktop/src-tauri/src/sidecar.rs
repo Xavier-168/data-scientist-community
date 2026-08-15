@@ -36,6 +36,11 @@ const LOCK_NAME: &str = ".sidecar.lock";
 const LOG_NAME: &str = "runner_process.log";
 const IDENTITY_MAX_BYTES: usize = 64 * 1024;
 const LOCK_POLL: Duration = Duration::from_millis(25);
+// Windows 冷启动（残留进程清理的 CIM 查询 + Defender 扫描新进程）经常
+// 超过 10 秒；放宽握手窗口，macOS 维持原值。
+#[cfg(windows)]
+const READY_TIMEOUT: Duration = Duration::from_secs(30);
+#[cfg(not(windows))]
 const READY_TIMEOUT: Duration = Duration::from_secs(10);
 const HEALTH_ATTEMPTS: usize = 50;
 const HEALTH_POLL: Duration = Duration::from_millis(100);
