@@ -77,11 +77,14 @@ async fn open_legacy_console(
         .title("数据科学家 · 兼容控制台")
         .on_new_window(|url, _features| {
             if should_open_in_system_browser(&url) {
-                // macOS 用 open；Windows 用 explorer 拉起默认浏览器。
+                // macOS 用 open；Windows 用 FileProtocolHandler 打开默认浏览器——
+                // explorer.exe 解析不了带 ?/& 查询参数的 URL，会退化成打开文件夹。
                 #[cfg(unix)]
                 let _ = Command::new("/usr/bin/open").arg(url.as_str()).spawn();
                 #[cfg(windows)]
-                let _ = Command::new("explorer.exe").arg(url.as_str()).spawn();
+                let _ = Command::new("rundll32.exe")
+                    .args(["url.dll,FileProtocolHandler", url.as_str()])
+                    .spawn();
             }
             tauri::webview::NewWindowResponse::Deny
         })
