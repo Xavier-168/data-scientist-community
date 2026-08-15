@@ -4134,17 +4134,25 @@ def _lark_cli_status(
             cached = _LARK_CLI_STATUS_CACHE.get(cache_key)
             if cached and now - float(cached.get("ts") or 0) < LARK_CLI_STATUS_CACHE_TTL_SECONDS:
                 return dict(cached.get("value") or {})
-    try:
-        stdout, stderr, rc = _run_lark_cli_raw(["auth", "status"], timeout=timeout, use_global=effective_global)
-    except Exception:
-        return {}
-    for payload_text in (stdout, stderr):
-        payload = _parse_lark_cli_status_payload(payload_text)
-        if payload:
-            if rc == 0 or isinstance(payload.get("identities"), dict):
+    # lark-cli 冷启动（版本检查网络请求、杀软扫描）偶发超时或输出异常，
+    # 返回空会被上层误判为“未登录/缺权限”——失败时空结果重试一次。
+    for attempt in range(2):
+        try:
+            stdout, stderr, rc = _run_lark_cli_raw(["auth", "status"], timeout=timeout, use_global=effective_global)
+        except Exception:
+            if attempt == 0:
+                time.sleep(1.5)
+                continue
+            return {}
+        for payload_text in (stdout, stderr):
+            payload = _parse_lark_cli_status_payload(payload_text)
+            if payload and (rc == 0 or isinstance(payload.get("identities"), dict)):
                 with _LARK_CLI_STATUS_CACHE_LOCK:
                     _LARK_CLI_STATUS_CACHE[cache_key] = {"ts": time.time(), "value": dict(payload)}
                 return dict(payload)
+        if attempt == 0:
+            time.sleep(1.5)
+            continue
     return {}
 
 
@@ -4294,7 +4302,7 @@ def _feishu_effective_context(config: dict | None) -> dict:
     if not cli_mode:
         return context
 
-    status = _lark_cli_status(use_global=use_global, timeout=6)
+    status = _lark_cli_status(use_global=use_global, timeout=20)
     identities = status.get("identities") if isinstance(status, dict) else {}
     bot = identities.get("bot") if isinstance(identities, dict) else {}
     user = identities.get("user") if isinstance(identities, dict) else {}
@@ -4303,7 +4311,7 @@ def _feishu_effective_context(config: dict | None) -> dict:
     context["bot_available"] = bot_available
     context["user_available"] = user_available
     context["identity"] = "user" if user_available else ("bot" if bot_available else "none")
-    scope_state = _lark_cli_user_scope_state(required_scopes=FEISHU_USER_BASE_SCOPES, use_global=use_global, timeout=6)
+    scope_state = _lark_cli_user_scope_state(required_scopes=FEISHU_USER_BASE_SCOPES, use_global=use_global, timeout=20)
     context["user_scope_ready"] = bool(scope_state.get("has_required_scopes"))
     context["missing_user_scopes"] = list(scope_state.get("missing_scopes") or [])
     context["user_scopes"] = list(scope_state.get("scopes") or [])
@@ -4658,7 +4666,7 @@ def _lark_cli_connect_worker(
         project_configured = _lark_cli_is_configured(use_global=False)
         project_ready = False
         if project_configured:
-            project_status = _lark_cli_status(use_global=False, timeout=8, force_refresh=True)
+            project_status = _lark_cli_status(use_global=False, timeout=20, force_refresh=True)
             identities = project_status.get("identities") if isinstance(project_status, dict) else {}
             bot = identities.get("bot") if isinstance(identities, dict) else {}
             user = identities.get("user") if isinstance(identities, dict) else {}
@@ -4799,7 +4807,7 @@ def _create_lark_cli_bitable_base(base_name: str) -> dict:
     name = _sanitize_workspace_name(base_name) or "自媒体数据分析"
     use_global = _saved_feishu_cli_use_global_home()
     if not _lark_cli_has_required_user_auth(use_global=use_global):
-        missing_scopes = _lark_cli_missing_required_user_scopes(use_global=use_global, timeout=8)
+        missing_scopes = _lark_cli_missing_required_user_scopes(use_global=use_global, timeout=20)
         raise RuntimeError(_required_user_scope_message(missing_scopes))
     identities = ["user"]
     last_error = ""
@@ -5374,10 +5382,10 @@ class Handler(BaseHTTPRequestHandler):
             current_token = str(config.get("feishu_app_token") or "").strip()
             owner_identity = str(config.get("feishu_bitable_owner_identity") or "").strip()
             requires_user_owned_base = not current_token or owner_identity == "user"
-            if requires_user_owned_base and not _lark_cli_has_required_user_auth(use_global=use_global, timeout=8):
+            if requires_user_owned_base and not _lark_cli_has_required_user_auth(use_global=use_global, timeout=20):
                 reason = "initial_feishu_base_owner" if not current_token else "user_owned_base_sync"
                 _start_lark_cli_user_auth(reason)
-                missing_scopes = _lark_cli_missing_required_user_scopes(use_global=use_global, timeout=8)
+                missing_scopes = _lark_cli_missing_required_user_scopes(use_global=use_global, timeout=20)
                 raise RuntimeError(_required_user_scope_message(missing_scopes))
             try:
                 config, created_bitable = _ensure_feishu_cli_bitable_target(config)
@@ -5587,8 +5595,8 @@ class Handler(BaseHTTPRequestHandler):
             raise RuntimeError("飞书测试失败。CLI 模式需要 app_id 且 lark-cli 已登录；App 模式需要 app_token、app_id、app_secret。")
         if sync_mode == "cli" and not str(merged.get("feishu_app_token") or "").strip():
             use_global = _saved_feishu_cli_use_global_home(merged)
-            if not _lark_cli_has_required_user_auth(use_global=use_global, timeout=8):
-                missing_scopes = _lark_cli_missing_required_user_scopes(use_global=use_global, timeout=8)
+            if not _lark_cli_has_required_user_auth(use_global=use_global, timeout=20):
+                missing_scopes = _lark_cli_missing_required_user_scopes(use_global=use_global, timeout=20)
                 raise RuntimeError(_required_user_scope_message(missing_scopes))
             return {"ok": True, "message": "飞书 CLI 已连接；首次同步时会自动创建可编辑的多维表格。"}
 
