@@ -4533,11 +4533,18 @@ def _run_lark_cli_user_auth_flow(
             raise RuntimeError(_friendly_lark_cli_auth_error("authorization timed out", trigger_reason=trigger_reason))
 
     _invalidate_lark_cli_caches()
-    scope_state = _lark_cli_user_scope_state(
-        required_scopes=cleaned_scopes,
-        use_global=use_global,
-        force_refresh=True,
-    )
+    # lark-cli 刚写完 token 就读 auth status，Windows 下偶发配置文件占用或
+    # 网络抖动导致查询失败（返回空），会被误判为未登录。重试几次再定论。
+    scope_state: dict = {}
+    for _attempt in range(3):
+        scope_state = _lark_cli_user_scope_state(
+            required_scopes=cleaned_scopes,
+            use_global=use_global,
+            force_refresh=True,
+        )
+        if scope_state.get("available"):
+            break
+        time.sleep(2)
     if not scope_state.get("available"):
         raise RuntimeError(_friendly_lark_cli_auth_error("not_logged_in", trigger_reason=trigger_reason))
     if cleaned_scopes and scope_state.get("missing_scopes"):
