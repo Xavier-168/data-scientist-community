@@ -73,8 +73,14 @@ async fn open_legacy_console(
         connection.token()
     ))
     .map_err(|error| format!("legacy_url_invalid:{error}"))?;
-    WebviewWindowBuilder::new(&app, "legacy", WebviewUrl::External(url))
-        .title("数据科学家 · 兼容控制台")
+    let mut console_builder = WebviewWindowBuilder::new(&app, "legacy", WebviewUrl::External(url))
+        .title("数据科学家 · 兼容控制台");
+    // Windows：控制台窗口同样启动即最大化（与主窗口一致）。
+    #[cfg(windows)]
+    {
+        console_builder = console_builder.maximized(true);
+    }
+    console_builder
         .on_new_window(|url, _features| {
             if should_open_in_system_browser(&url) {
                 // macOS 用 open；Windows 用 FileProtocolHandler 打开默认浏览器——
@@ -433,6 +439,11 @@ fn setup_desktop(app: &mut tauri::App, process_started: Instant) -> Result<(), B
     app.manage(metrics);
     app.manage(sidecar);
     app.manage(Arc::clone(&orchestrator));
+    // Windows：主窗口启动即最大化，免去每次手动放大。
+    #[cfg(windows)]
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.maximize();
+    }
     orchestrator.launch();
     Ok(())
 }
