@@ -23,7 +23,11 @@ import certifi
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-from runtime_paths import resolve_auth_dir, resolve_downloads_dir, seed_state_from_bundle
+# Windows 嵌入式 Python（._pth）不把脚本目录加入 sys.path，本地模块需要自举。
+_SELF_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SELF_DIR not in sys.path:
+    sys.path.insert(0, _SELF_DIR)
+from runtime_paths import resolve_auth_dir, resolve_downloads_dir, seed_state_from_bundle  # noqa: E402
 
 STATE_DIR = Path(seed_state_from_bundle(ROOT_DIR))
 AUTH_DIR = Path(resolve_auth_dir(ROOT_DIR, STATE_DIR))

@@ -15,7 +15,16 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 
-from core.io import write_json_file_atomically
+# Windows 嵌入式 Python（._pth）不会把脚本目录加入 sys.path，
+# 本地包 core/platform_source_rows/domain 需要显式自举（与 merge_channels 相同模式）。
+import os as _os
+import sys as _sys
+
+_SELF_DIR = _os.path.dirname(_os.path.abspath(__file__))
+if _SELF_DIR not in _sys.path:
+    _sys.path.insert(0, _SELF_DIR)
+
+from core.io import write_json_file_atomically  # noqa: E402
 
 from platform_source_rows import (
     DOWNLOADS_DIR,
