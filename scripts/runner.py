@@ -4057,7 +4057,19 @@ def _run_lark_cli_raw(args: list[str], timeout: int = 120, use_global: bool | No
     cmd = _resolve_lark_cli_prefix() + args
     env = _lark_cli_env(use_global=use_global)
 
-    proc = subprocess.run(cmd, cwd=LARK_CLI_DIR, env=env, capture_output=True, text=True, timeout=timeout)
+    # lark-cli 输出 UTF-8 JSON（含中文账号名）；Windows 下 text=True 默认
+    # GBK 解码会在特定字节序列上崩溃（reader 线程 UnicodeDecodeError，
+    # 调用挂起/误报缺权限），必须显式 UTF-8。
+    proc = subprocess.run(
+        cmd,
+        cwd=LARK_CLI_DIR,
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+    )
     return (proc.stdout or "").strip(), (proc.stderr or "").strip(), proc.returncode
 
 
