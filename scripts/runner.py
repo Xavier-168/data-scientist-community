@@ -4531,6 +4531,14 @@ def _run_lark_cli_user_auth_flow(
             }
         )
 
+    # Windows：授权链接生成后自动用默认浏览器拉起授权页，免去用户再点
+    # “打开飞书扫码”（页面侧 window.open 受弹窗拦截，服务端拉起无此问题）。
+    if os.name == "nt":
+        try:
+            os.startfile(captured_url)
+        except Exception:
+            pass
+
     complete_output = ""
     try:
         complete_proc = subprocess.run(
