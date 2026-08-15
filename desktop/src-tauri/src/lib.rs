@@ -461,8 +461,19 @@ fn source_app_path() -> Result<PathBuf, Box<dyn Error>> {
 pub fn run() {
     let process_started = Instant::now();
 
-
     let app = tauri::Builder::default()
+        // 单实例保护：重复启动时聚焦已有窗口并退出新进程，
+        // 避免第二个实例抢 sidecar 锁后以降级态启动（用户会看到
+        // “被其他程序控制”类错误）。
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            for label in ["legacy", "main"] {
+                if let Some(window) = app.get_webview_window(label) {
+                    let _ = window.unminimize();
+                    let _ = window.show();
+                    let _ = window.set_focus();
+                }
+            }
+        }))
         .invoke_handler(tauri::generate_handler![
             get_startup_snapshot,
             retry_startup_stage,

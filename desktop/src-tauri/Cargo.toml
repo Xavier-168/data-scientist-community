@@ -38,6 +38,7 @@ tokio = { version = "1", features = ["macros", "process", "rt-multi-thread", "sy
 tracing = "0.1"
 uuid = { version = "1", features = ["v4"] }
 zstd = "0.13"
+tauri-plugin-single-instance = "2"
 
 [target.'cfg(unix)'.dependencies]
 nix = { version = "0.29", features = ["process", "signal"] }
