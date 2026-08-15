@@ -2425,31 +2425,98 @@
     }
   });
 
-  // 主页操作
+  // 主页操作：导出 Excel——优先弹系统保存对话框让用户选择保存位置
+  // 注意：监管模式下会话令牌只认 X-YRG-Session 请求头（查询参数被忽略，
+  // window.open 无法带自定义头），所有导出请求必须走带头的 fetch。
+  async function fetchExcelBlob(downloadUrl) {
+    const resp = await fetch(withSessionQuery(downloadUrl), {
+      headers: { 'X-YRG-Session': SESSION_TOKEN },
+    });
+    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+    return await resp.blob();
+  }
+
+  async function saveExcelWithPicker(downloadUrl, label) {
+    if (!window.showSaveFilePicker) return false;
+    try {
+      const date = new Date().toISOString().slice(0, 10);
+      const handle = await window.showSaveFilePicker({
+        suggestedName: `数据科学家-${label}-${date}.xlsx`,
+        startIn: 'desktop',
+        types: [{
+          description: 'Excel 工作簿',
+          accept: { 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'] },
+        }],
+      });
+      const writable = await handle.createWritable();
+      await writable.write(await fetchExcelBlob(downloadUrl));
+      await writable.close();
+      showToast(`已保存：${label}`, 'success');
+      return true;
+    } catch (err) {
+      if (err && err.name === 'AbortError') return true; // 用户取消了保存
+      return false; // 保存流程失败，回退浏览器下载
+    }
+  }
+
+  async function downloadExcelViaBrowser(downloadUrl, label) {
+    const date = new Date().toISOString().slice(0, 10);
+    const blob = await fetchExcelBlob(downloadUrl);
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = `数据科学家-${label}-${date}.xlsx`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 30000);
+  }
+
+  function excelDownloadUrlFor(chosen) {
+    return chosen.key === 'all'
+      ? withEnabledPlatformsQuery('/download-excel?file=all')
+      : `/download-excel?file=${chosen.key}`;
+  }
+
+  async function exportExcelChoice(chosen) {
+    const url = excelDownloadUrlFor(chosen);
+    if (await saveExcelWithPicker(url, chosen.label)) return;
+    try {
+      await downloadExcelViaBrowser(url, chosen.label);
+      showToast(`正在下载 ${chosen.label} Excel`, 'success');
+    } catch (err) {
+      showToast(`导出失败：${err && err.message ? err.message : '未知错误'}`, 'error');
+    }
+  }
+
   document.getElementById('btn-download-excel').addEventListener('click', () => {
-    // 弹出选择：下载全平台汇总 or 单平台
     const enabled = state.config?.enabled_platforms || [];
     let options = [{ key: 'all', label: '全平台汇总数据' }];
     enabled.forEach(p => options.push({ key: p, label: LABELS[p] }));
 
+    // 只有 1 个平台或没有：直接导出汇总
     if (options.length <= 2) {
-      // 只有1个平台或没有，直接下载汇总
-      window.open(withSessionQuery(withEnabledPlatformsQuery('/download-excel?file=all')), '_blank');
-      showToast('正在下载全平台汇总 Excel', 'success');
+      void exportExcelChoice(options[0]);
       return;
     }
 
-    // 多平台时弹出选择
-    let selectHtml = options.map(o => `<option value="${o.key}">${o.label}</option>`).join('');
-    const sel = prompt('选择要下载的数据（输入序号）：\n' + options.map((o, i) => `${i}: ${o.label}`).join('\n'), '0');
-    if (sel === null) return;
-    const idx = parseInt(sel);
-    const chosen = options[idx] || options[0];
-    const downloadUrl = chosen.key === 'all'
-      ? withEnabledPlatformsQuery('/download-excel?file=all')
-      : `/download-excel?file=${chosen.key}`;
-    window.open(withSessionQuery(downloadUrl), '_blank');
-    showToast(`正在下载 ${chosen.label} Excel`, 'success');
+    // 多平台：原生 dialog 选择（点击选项本身就是用户激活）
+    const dialog = document.getElementById('excel-export-dialog');
+    const container = document.getElementById('excel-export-options');
+    container.innerHTML = '';
+    options.forEach(o => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = 'btn btn-secondary';
+      btn.style.width = '100%';
+      btn.textContent = o.label;
+      btn.addEventListener('click', () => {
+        dialog.close();
+        void exportExcelChoice(o);
+      });
+      container.appendChild(btn);
+    });
+    document.getElementById('excel-export-cancel').onclick = () => dialog.close();
+    dialog.showModal();
   });
 
   document.getElementById('btn-auth-all').addEventListener('click', () => triggerAuthAll());
@@ -3253,6 +3320,13 @@
     }
   });
 </script>
+
+<!-- 导出 Excel：平台选择用原生 dialog（保留用户激活，系统保存对话框才能弹出） -->
+<dialog id="excel-export-dialog" style="border:none;border-radius:12px;padding:24px 28px;min-width:320px;box-shadow:0 12px 40px rgba(0,0,0,.25);">
+  <div style="font-size:16px;font-weight:600;margin-bottom:16px;">选择要导出的数据</div>
+  <div id="excel-export-options" style="display:flex;flex-direction:column;gap:8px;margin-bottom:16px;"></div>
+  <button id="excel-export-cancel" type="button" class="btn btn-secondary" style="width:100%;">取消</button>
+</dialog>
 
 </body>
 </html>
