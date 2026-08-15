@@ -55,6 +55,64 @@ async function main() {
     }),
     true
   );
+  assert.strictEqual(
+    mod.classifyBilibiliTargetDiscovery({ responseShapeOk: false }),
+    "response_shape_changed"
+  );
+  assert.strictEqual(
+    mod.classifyBilibiliTargetDiscovery({ rawWorks: 0 }),
+    "api_empty"
+  );
+  assert.strictEqual(
+    mod.classifyBilibiliTargetDiscovery({ rawWorks: 3, invalidWorks: 3 }),
+    "unparseable_items"
+  );
+  assert.strictEqual(
+    mod.classifyBilibiliTargetDiscovery({ rawWorks: 3, outsideDateWorks: 3 }),
+    "outside_date_range"
+  );
+  assert.strictEqual(
+    mod.classifyBilibiliTargetDiscovery({ rawWorks: 3, acceptedWorks: 2 }),
+    "ok"
+  );
+  assert.deepStrictEqual(
+    mod.buildBilibiliOfficialFallbackTargets(
+      [
+        { title: "范围外", publishText: "2025-12-31", publishTs: new Date(2025, 11, 31).getTime() },
+        { title: "范围内A", publishText: "2026-01-02", publishTs: new Date(2026, 0, 2).getTime() },
+        { title: "范围内B", publishText: "2026-01-03", publishTs: new Date(2026, 0, 3).getTime() },
+      ],
+      { minDate: "2026-01-01", videoLimit: 1 }
+    ).map((item) => item.title),
+    ["范围内B"]
+  );
+  assert.strictEqual(
+    mod.shouldStopBilibiliOfficialFallbackScroll({
+      scrollChanged: true,
+      atBottom: false,
+      reachedDateBoundary: false,
+      stableRounds: 5,
+    }),
+    false
+  );
+  assert.strictEqual(
+    mod.shouldStopBilibiliOfficialFallbackScroll({
+      scrollChanged: true,
+      atBottom: false,
+      reachedDateBoundary: true,
+      stableRounds: 2,
+    }),
+    true
+  );
+  assert.strictEqual(
+    mod.shouldStopBilibiliOfficialFallbackScroll({
+      scrollChanged: false,
+      atBottom: true,
+      reachedDateBoundary: false,
+      stableRounds: 2,
+    }),
+    true
+  );
 }
 
 main().catch((error) => {

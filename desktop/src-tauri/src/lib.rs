@@ -10,6 +10,7 @@ use std::{
     error::Error,
     fs,
     path::{Path, PathBuf},
+    process::Command,
     sync::Arc,
     time::Instant,
 };
@@ -74,9 +75,63 @@ async fn open_legacy_console(
     .map_err(|error| format!("legacy_url_invalid:{error}"))?;
     WebviewWindowBuilder::new(&app, "legacy", WebviewUrl::External(url))
         .title("数据科学家 · 兼容控制台")
+        .on_new_window(|url, _features| {
+            if should_open_in_system_browser(&url) {
+                // macOS 用 open；Windows 用 explorer 拉起默认浏览器。
+                #[cfg(unix)]
+                let _ = Command::new("/usr/bin/open").arg(url.as_str()).spawn();
+                #[cfg(windows)]
+                let _ = Command::new("explorer.exe").arg(url.as_str()).spawn();
+            }
+            tauri::webview::NewWindowResponse::Deny
+        })
         .build()
         .map_err(|error| error.to_string())?;
     Ok(())
+}
+
+fn should_open_in_system_browser(url: &tauri::Url) -> bool {
+    let Some(host) = url.host_str() else {
+        return false;
+    };
+    let feishu_host = host == "feishu.cn"
+        || host.ends_with(".feishu.cn")
+        || host == "larkoffice.com"
+        || host.ends_with(".larkoffice.com");
+    let local_excel =
+        matches!(host, "127.0.0.1" | "localhost" | "::1") && url.path() == "/download-excel";
+    (url.scheme() == "https" && feishu_host) || (url.scheme() == "http" && local_excel)
+}
+
+#[cfg(test)]
+mod external_url_tests {
+    use super::should_open_in_system_browser;
+
+    #[test]
+    fn allows_feishu_and_local_excel_only() {
+        for url in [
+            "https://accounts.feishu.cn/oauth/v1/device/verify?user_code=TEST",
+            "https://tenant.larkoffice.com/base/test",
+            "http://127.0.0.1:8811/download-excel?file=all",
+            "http://localhost:8811/download-excel?file=bilibili",
+        ] {
+            assert!(
+                should_open_in_system_browser(&tauri::Url::parse(url).unwrap()),
+                "{url}"
+            );
+        }
+        for url in [
+            "http://accounts.feishu.cn/oauth/v1/device/verify",
+            "https://feishu.cn.evil.example/path",
+            "http://127.0.0.1:8811/config",
+            "https://example.com/download-excel",
+        ] {
+            assert!(
+                !should_open_in_system_browser(&tauri::Url::parse(url).unwrap()),
+                "{url}"
+            );
+        }
+    }
 }
 
 #[cfg(unix)]

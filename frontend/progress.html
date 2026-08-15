@@ -2013,6 +2013,8 @@
        
        if (pData.ui_status === 'authorizing') {
          statusBadgeStr = `<span class="badge yellow">授权中...</span>`;
+       } else if (pData.ui_status === 'queued') {
+         statusBadgeStr = `<span class="badge yellow">排队等待...</span>`;
        } else if (pData.ui_status === 'running') {
          statusBadgeStr = `<span class="badge yellow">采集进行中...</span>`;
        } else if (pData.ui_status === 'failed') {
