@@ -4432,6 +4432,14 @@ def _start_lark_cli_user_auth(trigger_reason: str = "") -> dict:
     global _LARK_CLI_STATE
     with _LARK_CLI_LOCK:
         if _LARK_CLI_STATE.get("phase") in {"connecting", "scan_qr", "auth_waiting"} and _LARK_CLI_STATE.get("auth_mode") == "user":
+            # 已有授权流程在等扫码：用户此时点“重新生成授权链接”多半是
+            # 页面没弹出来——把现有授权页再拉起一次（仅 Windows）。
+            existing_url = str(_LARK_CLI_STATE.get("verification_url") or "").strip()
+            if existing_url and os.name == "nt":
+                try:
+                    os.startfile(existing_url)
+                except Exception:
+                    pass
             return {"ok": True, **dict(_LARK_CLI_STATE)}
         _LARK_CLI_STATE.update(
             {
