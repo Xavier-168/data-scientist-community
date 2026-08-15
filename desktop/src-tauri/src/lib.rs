@@ -481,6 +481,15 @@ pub fn run() {
                 if let Some(window) = app.get_webview_window(label) {
                     let _ = window.unminimize();
                     let _ = window.show();
+                    // Windows 前台限制下 set_focus 可能只闪任务栏不抬窗；
+                    // 短暂置顶再取消可强制把窗口带到最前。
+                    #[cfg(windows)]
+                    {
+                        let _ = window.set_always_on_top(true);
+                        let _ = window.set_focus();
+                        let _ = window.set_always_on_top(false);
+                    }
+                    #[cfg(not(windows))]
                     let _ = window.set_focus();
                 }
             }
