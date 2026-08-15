@@ -7003,9 +7003,40 @@ class Handler(BaseHTTPRequestHandler):
                             },
                         )
                         return
+            elif which in ENRICHED_PLATFORM_FILES:
+                # 单平台：enriched 与原始文件都不存在时按需重建（与 all 相同
+                # 的重建路径），避免采集后从未生成过单平台文件时导出 404。
+                enriched_target = ENRICHED_PLATFORM_FILES[which]
+                raw_target = raw_map.get(which, "")
+                if not os.path.exists(enriched_target) and not os.path.exists(raw_target):
+                    config = load_saved_config()
+                    excel_cmd = [
+                        PYTHON_BIN,
+                        BUILD_EXCEL_SCRIPT,
+                        "--mode",
+                        which,
+                        "--output",
+                        enriched_target,
+                    ]
+                    chosen_min_date = str(config.get("min_publish_date") or DEFAULT_CONFIG["min_publish_date"]).strip()
+                    if chosen_min_date:
+                        excel_cmd.extend(["--min-date", chosen_min_date])
+                    rebuild_proc = self._run_script(excel_cmd, os.environ.copy(), timeout=180)
+                    rebuild_stdout, rebuild_stderr = self._get_proc_output(rebuild_proc)
+                    self._append_log("DOWNLOAD_EXCEL_REBUILD", rebuild_stdout, rebuild_stderr)
             target = enriched_map.get(which, "")
             if not target or not os.path.exists(target):
                 target = raw_map.get(which, ALL_DATA_FILE)
+            if not os.path.exists(target):
+                self._send_json(
+                    404,
+                    {
+                        "ok": False,
+                        "error": "excel_not_ready",
+                        "message": "该平台还没有可导出的数据，请先完成一次采集。",
+                    },
+                )
+                return
             self._send_file(target, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", as_download=True)
             return
 
