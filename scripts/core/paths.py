@@ -51,14 +51,21 @@ def resolve_state_dir(base_dir: str | Path, explicit_state_dir: str | Path | Non
         return str(Path(explicit).expanduser().resolve())
 
     base_path = Path(base_dir).resolve()
-    if sys.platform != "darwin":
+    if sys.platform == "darwin":
+        # macOS 源码态和封装态都必须把 Cookie、导出、日志等运行数据放到
+        # 用户可写目录。源码目录可能是只读安装位置，也不应承载敏感状态。
+        app_support_root = Path.home() / "Library" / "Application Support" / APP_SUPPORT_NAME
+        package_id = read_package_id(base_path) if is_packaged_runtime(base_path) else ""
+        return str((app_support_root / package_id) if package_id else app_support_root)
+
+    if os.name == "nt":
         return str(base_path)
 
-    # macOS 源码态和封装态都必须把 Cookie、导出、日志等运行数据放到
-    # 用户可写目录。源码目录可能是只读安装位置，也不应承载敏感状态。
-    app_support_root = Path.home() / "Library" / "Application Support" / APP_SUPPORT_NAME
-    package_id = read_package_id(base_path) if is_packaged_runtime(base_path) else ""
-    return str((app_support_root / package_id) if package_id else app_support_root)
+    # Linux / WSL：遵循 XDG 规范，运行数据（Cookie、导出、日志、Playwright
+    # 浏览器、会话元数据）放到用户数据目录，避免污染源码目录。
+    data_home = os.environ.get("XDG_DATA_HOME", "").strip()
+    data_root = Path(data_home) if data_home else Path.home() / ".local" / "share"
+    return str(data_root / "data-scientist-community")
 
 
 def resolve_downloads_dir(base_dir: str | Path, explicit_state_dir: str | Path | None = None) -> str:

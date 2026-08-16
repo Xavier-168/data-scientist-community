@@ -181,8 +181,16 @@ class ApiSecurityTests(unittest.TestCase):
     def test_runner_binding_rejects_non_loopback_hosts(self):
         for host in ("0.0.0.0", "::", "192.168.1.50", "example.test"):
             with self.subTest(host=host):
-                with self.assertRaisesRegex(ValueError, "loopback"):
+                with (
+                    patch.object(runner, "_is_wsl", return_value=False),
+                    self.assertRaisesRegex(ValueError, "loopback"),
+                ):
                     runner._bind_runner_server(host, 0, runner.Handler)
+
+    def test_runner_binding_permits_wildcard_on_wsl_only(self):
+        with patch.object(runner, "_is_wsl", return_value=True):
+            server = runner._bind_runner_server("0.0.0.0", 0, runner.Handler)
+            server.server_close()
 
     def test_runner_binding_accepts_localhost_only(self):
         servers = []

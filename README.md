@@ -88,6 +88,24 @@ chmod +x start.sh scripts/*.sh
 
 服务默认监听 `127.0.0.1:8811`。首次采集需要在系统浏览器窗口中由用户本人完成扫码或登录。运行数据、Cookie/Profile、登录态检查元数据和 Playwright 浏览器默认写入 `~/Library/Application Support/数据科学家 Community/`，不会写入源码目录；可通过 `YIRENGONGIS_STATE_DIR` 显式覆盖。不要把状态目录、日志、截图或导出数据提交到 Git。
 
+### Linux / WSL
+
+源码运行已适配 Linux（含 WSL2）。一键安装依赖（Python 3.12 + Node 22 + Playwright 系统依赖 + venv）：
+
+```bash
+bash scripts/install_wsl_deps.sh
+./start.sh
+```
+
+工作台说明、授权登录、状态目录与注意事项见 [docs/WSL_GUIDE.md](docs/WSL_GUIDE.md)。
+
+说明：
+
+- `install_wsl_deps.sh` 使用 [uv](https://astral.sh/uv/) 在用户目录安装 Python 3.12，Node 22 下载到 `~/.local/node22`（或复用已存在的 nvm/系统 Node 22），均不需要 root。
+- Playwright 系统依赖优先用 `sudo npx playwright install-deps chromium`；无 sudo 时自动回退为 `scripts/install_linux_browser_libs.sh`（`apt download` + `dpkg -x` 解包到 `~/.local/chromium-libs`），`start.sh` 会自动注入 `LD_LIBRARY_PATH`。
+- Linux 下运行数据默认写入 `~/.local/share/data-scientist-community/`（遵循 XDG），不污染源码目录。
+- 无图形界面的 WSL 无法自动弹出浏览器窗口，这是环境限制；服务本身正常运行，可在 Windows 侧浏览器访问 `http://127.0.0.1:8811/monitor`，或使用 `./start.sh --no-open`。
+
 开发者可执行：
 
 ```bash

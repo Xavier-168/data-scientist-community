@@ -392,6 +392,9 @@
   const PAGE_URL = new URL(window.location.href);
   const HASH_SESSION_TOKEN = new URLSearchParams(window.location.hash.replace(/^#/, '')).get('session') || '';
   const QUERY_SESSION_TOKEN = PAGE_URL.searchParams.get('session') || '';
+  // Token injected server-side into the served HTML (works from any client,
+  // e.g. the Windows host in WSL, where loopback-only /session/recover is refused).
+  const META_SESSION_TOKEN = (document.querySelector('meta[name="yrg-session-token"]')?.getAttribute('content')) || '';
 
   function readPersistedSessionToken() {
     try {
@@ -437,8 +440,8 @@
   }
 
   const STORED_SESSION_TOKEN = readPersistedSessionToken();
-  const SESSION_SOURCE = HASH_SESSION_TOKEN ? 'hash' : (QUERY_SESSION_TOKEN ? 'query' : (STORED_SESSION_TOKEN ? 'storage' : ''));
-  let SESSION_TOKEN = HASH_SESSION_TOKEN || QUERY_SESSION_TOKEN || STORED_SESSION_TOKEN;
+  const SESSION_SOURCE = HASH_SESSION_TOKEN ? 'hash' : (QUERY_SESSION_TOKEN ? 'query' : (META_SESSION_TOKEN ? 'meta' : (STORED_SESSION_TOKEN ? 'storage' : '')));
+  let SESSION_TOKEN = HASH_SESSION_TOKEN || QUERY_SESSION_TOKEN || META_SESSION_TOKEN || STORED_SESSION_TOKEN;
 
   // Auto-recover session from backend when URL/localStorage have no token.
   // This handles: browser restored old tab, file:// redirect lost hash, double-click race, etc.
