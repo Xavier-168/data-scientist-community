@@ -252,6 +252,38 @@ class PublicReleaseContractTests(unittest.TestCase):
             payload = json.loads(report.read_text(encoding="utf-8"))
             self.assertEqual(payload["counts"], {"critical": 0, "high": 0, "medium": 0, "low": 0})
 
+    def test_history_scan_allows_only_the_exact_approved_large_binary(self):
+        module_path = ROOT / "scripts" / "public_audit_scan.py"
+        spec = importlib.util.spec_from_file_location("community_public_audit_scan", module_path)
+        module = importlib.util.module_from_spec(spec)
+        assert spec and spec.loader
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+
+        path = "frontend/assets/fonts/NotoSerifSC-Variable.ttf"
+        raw = b"\x00" + (b"approved-font-fixture" * 120_000)
+        digest = __import__("hashlib").sha256(raw).hexdigest()
+
+        def fake_run(command, **kwargs):
+            if command[:3] == ["git", "cat-file", "blob"]:
+                return subprocess.CompletedProcess(command, 0, stdout=raw)
+            if command[:2] == ["git", "log"]:
+                return subprocess.CompletedProcess(command, 0, stdout="")
+            self.fail(f"unexpected git command: {command}")
+
+        with (
+            patch.object(
+                module,
+                "_git_blob_records",
+                side_effect=lambda _repo: iter([("a" * 40, len(raw), path)]),
+            ),
+            patch.object(module.subprocess, "run", side_effect=fake_run),
+        ):
+            self.assertEqual(module.scan_git_history(ROOT, [], {path: digest}), [])
+            findings = module.scan_git_history(ROOT, [], {path: "0" * 64})
+
+        self.assertEqual([item.rule for item in findings], ["history_large_blob"])
+
 
 if __name__ == "__main__":
     unittest.main()

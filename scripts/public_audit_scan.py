@@ -272,11 +272,22 @@ def scan_git_history(
 ) -> list[Finding]:
     findings: list[Finding] = []
     for oid, size, path in _git_blob_records(repo):
+        normalized_path = path.replace(os.sep, "/")
         suffix = Path(path).suffix.lower()
         if suffix in FORBIDDEN_SUFFIXES:
             findings.append(Finding("critical", "history_forbidden_file_type", path, 0, oid[:12], "git-history"))
             continue
         if size > 2 * 1024 * 1024:
+            expected = allowed_binaries.get(normalized_path)
+            if expected:
+                raw = subprocess.run(
+                    ["git", "cat-file", "blob", oid],
+                    cwd=repo,
+                    check=True,
+                    stdout=subprocess.PIPE,
+                ).stdout
+                if hashlib.sha256(raw).hexdigest() == expected:
+                    continue
             findings.append(Finding("medium", "history_large_blob", path, 0, oid[:12], "git-history"))
             continue
         raw = subprocess.run(
@@ -287,7 +298,7 @@ def scan_git_history(
         ).stdout
         if _is_probably_binary(raw):
             digest = hashlib.sha256(raw).hexdigest()
-            if allowed_binaries.get(path.replace(os.sep, "/")) == digest:
+            if allowed_binaries.get(normalized_path) == digest:
                 continue
             findings.append(Finding("medium", "history_binary_blob", path, 0, oid[:12], "git-history"))
             continue

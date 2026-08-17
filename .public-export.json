@@ -114,7 +114,7 @@
     "scripts/package_public_keys.json": "01e9eafdde5eead84b2546703a501a504b2336bd49706f9c182ae9bfb73f6cdc",
     "scripts/platform_source_rows.py": "0476a1e45d9082839ef4e968b9542dd0410cb13d1b84e1488577a4c44f49c02b",
     "scripts/prepare_feishu_bitable_sync_v2.py": "6e031c21b67677512f0b155b75757edc66cc16d4d13a0bd08157974f889c4b4f",
-    "scripts/public_audit_scan.py": "6b6046954fc078e095abec88e3697afffeff120d706068f9e9292816801ea4c5",
+    "scripts/public_audit_scan.py": "8934a426386e5d61d779def6988bdfa4a9566898509716b90973b314bf5863fc",
     "scripts/run_bili_export.sh": "f353c8b099723b157cf20f14b784e38b832be9d8531b38df5a6b5a38cc9d66a6",
     "scripts/run_export.sh": "a73deab7a53d0fe045980582f6796c1684333a349ece28c2a5ef432f078a92f7",
     "scripts/run_ks_export.sh": "603b34f2ec2b4f59d7fb3d0294a0f71729f1fc1937a7aaacfe7e80c07f2dc07d",
@@ -154,7 +154,7 @@
     "scripts/test_platform_scope_pipeline.py": "f5ff28de403b846d8c375b4b5934b841e54827321636ae180401008b4c9f9e8e",
     "scripts/test_progress_dashboard_copy.js": "9ce177f05f84206178c9f0a3d5d775ab997e3741a975435859bc3c5b1c08df07",
     "scripts/test_progress_workflow_guards.js": "6b8260a28144eb0b11522abcdf3be457837165792a690be8677c94ac7f1fb4aa",
-    "scripts/test_public_release.py": "1af78b83d39a45d9b05ae79dc55651bfc77bcf450bb332fcace3a208e065299a",
+    "scripts/test_public_release.py": "391973fc31b4723541423553c6d25e418f7df973fb3a43edca7038d9cca4203c",
     "scripts/test_run_artifacts.py": "a65e18ca7ab55ba60a527e9002dd4b3610e1e4b41677d8caa4fb32e4c7d354e4",
     "scripts/test_run_lease.py": "95dceefe6bc35d7872432feedc26113c2cb419bed401997fd79b80e55c9cd99a",
     "scripts/test_runner_feishu_history.py": "1dc3bb50f47a56131af824af015925003abb1f156ffaed2e02498a9104b7dbe4",
@@ -176,7 +176,7 @@
   },
   "source_snapshot": {
     "base_commit": "be26103a6d91492a6730833fbd61261dd249a34d",
-    "content_sha256": "b63a441544131b9c20119ae0e7fc4beeeb52fbd2d5ae6d1ec4f29f820800d449",
+    "content_sha256": "34d4d5260b49f6f7419a21d534008142d59b1b3b48f5ea989f4d0423bf1b8fe9",
     "inputs_dirty_against_base_commit": true,
     "kind": "working_tree"
   },

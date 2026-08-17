@@ -286,7 +286,7 @@
   "deterministic_overrides": [
     "Remove all production license, update, and feedback defaults",
     "Enable local community access only when COMMUNITY_EDITION marker is present",
-    "Replace bundled font declarations with system font fallbacks",
+    "Exclude unverified bundled fonts; allow only the pinned Google Fonts Noto Serif SC asset and keep system fallbacks elsewhere",
     "Replace original Tauri identity and icons with community values",
     "Redact private service domains and developer absolute paths",
     "Refuse export when a required source or transform anchor changes"
