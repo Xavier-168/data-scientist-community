@@ -211,6 +211,8 @@ def load_cargo_metadata_from_tool(root: Path) -> list[dict[str, Any]]:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=300,
     )
     try:

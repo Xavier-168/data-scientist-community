@@ -227,6 +227,8 @@ class IsolatedStateDirectoryPipelineTests(unittest.TestCase):
             env=self._subprocess_env(base_dir, state_dir),
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=60,
             check=False,
         )

@@ -68,10 +68,14 @@ def sort_existing_paths(paths: list[str]) -> list[str]:
 
 def _powershell_output(script: str, timeout: float = 8.0) -> str:
     """执行 PowerShell 片段并返回 stdout（失败返回空串）。仅 Windows 使用。"""
-    command = ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script]
+    # PowerShell 5.1 重定向输出默认 OEM 码页；强制控制台输出为 UTF-8 后
+    # 才能按 utf-8 解码含中文路径的 CommandLine。
+    prologue = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; "
+    command = ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", prologue + script]
     kwargs = {
         "capture_output": True,
         "text": True,
+        "encoding": "utf-8",
         "errors": "replace",
         "timeout": timeout,
     }
@@ -108,6 +112,8 @@ def port_listener_pids(port: int) -> list[int]:
             ["lsof", "-ti", f":{port}", "-sTCP:LISTEN"],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=3,
         )
     except Exception:
@@ -129,6 +135,8 @@ def process_command(pid: int) -> str:
             ["ps", "-p", str(pid), "-o", "command="],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=3,
         )
     except Exception:
@@ -141,7 +149,13 @@ def terminate_pid_tree(pid: int, *, grace_seconds: float = 2.0) -> bool:
     if pid <= 0 or pid == os.getpid():
         return False
     if os.name == "nt":
-        kwargs = {"capture_output": True, "text": True, "timeout": 15}
+        kwargs = {
+            "capture_output": True,
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+            "timeout": 15,
+        }
         kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
         try:
             result = subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], **kwargs)
@@ -187,7 +201,10 @@ def terminate_profile_browsers(profile_dir: str, *, grace_seconds: float = 1.5) 
         return []
     try:
         output = subprocess.check_output(
-            ["ps", "-axo", "pid=,command="], text=True, errors="replace"
+            ["ps", "-axo", "pid=,command="],
+            text=True,
+            encoding="utf-8",
+            errors="replace",
         )
     except Exception:
         return []

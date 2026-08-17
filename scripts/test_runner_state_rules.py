@@ -2581,6 +2581,7 @@ class FeishuVerificationUrlOpenTests(unittest.TestCase):
             stdout=runner.subprocess.PIPE,
             stderr=runner.subprocess.STDOUT,
             text=True,
+            encoding="utf-8",
         )
         started = time.monotonic()
         with self.assertRaises(runner.subprocess.TimeoutExpired):
@@ -2594,6 +2595,7 @@ class FeishuVerificationUrlOpenTests(unittest.TestCase):
             stdout=runner.subprocess.PIPE,
             stderr=runner.subprocess.STDOUT,
             text=True,
+            encoding="utf-8",
         )
         lines = []
         runner._consume_lark_cli_output(proc, lines.append, timeout_seconds=2)

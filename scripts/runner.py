@@ -25,6 +25,19 @@ _SELF_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SELF_DIR not in sys.path:
     sys.path.insert(0, _SELF_DIR)
 
+# 打包态 sidecar 不注入 PYTHONUTF8；stdout 管道默认 ANSI 代码页（中文系统
+# GBK），而 Node 采集器按 utf-8 解析 Python 子进程的 JSON 输出。与源码态
+# start_monitor 对齐，统一子进程 stdio 编码，避免中文键值静默乱码。
+os.environ.setdefault("PYTHONUTF8", "1")
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+for _stream in (sys.stdout, sys.stderr):
+    _reconfigure = getattr(_stream, "reconfigure", None)
+    if callable(_reconfigure):
+        try:
+            _reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
+
 from analytics_engine import archive_snapshot_from_excel, compute_dashboard, list_recent_runs
 from client_license import LICENSE_VERIFY_CACHE_TTL_SECONDS, LicenseManager
 from feedback_manager import send_feedback
@@ -166,12 +179,22 @@ end run
 
 def _run_excel_save_dialog(default_filename: str) -> dict:
     """Open the native macOS Save As panel without interpolating user text into AppleScript."""
+    if sys.platform != "darwin":
+        # Windows/Linux 前端走浏览器 showSaveFilePicker，macOS 原生面板不适用
+        return {
+            "ok": False,
+            "cancelled": False,
+            "error": "excel_save_dialog_unsupported",
+            "message": "当前平台不支持原生保存窗口，请使用页面内保存。",
+        }
     safe_name = os.path.basename(str(default_filename or "数据汇总.xlsx").strip()) or "数据汇总.xlsx"
     try:
         completed = subprocess.run(
             ["/usr/bin/osascript", "-e", _EXCEL_SAVE_DIALOG_SCRIPT, safe_name],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=600,
             check=False,
         )
@@ -3074,6 +3097,7 @@ def _profile_browser_pids(profile_dir: str) -> list[int]:
         output = subprocess.check_output(
             ["ps", "-axo", "pid=,command="],
             text=True,
+            encoding="utf-8",
             errors="replace",
             timeout=3,
         )
@@ -4395,11 +4419,18 @@ def _feishu_bitable_url(app_token: str) -> str:
 
 
 def _lark_cli_auth_list_text(use_global: bool | None = None) -> str:
-    try:
-        stdout, stderr, _rc = _run_lark_cli_raw(["auth", "list"], timeout=10, use_global=use_global)
-    except Exception:
-        return ""
-    return (stdout or stderr or "").strip()
+    # lark-cli 冷启动（网络版本检查、杀软扫描）可能超过 10s，
+    # 超时下限 20s 且失败重试一次，避免上层误判“未配置”。
+    for attempt in range(2):
+        try:
+            stdout, stderr, _rc = _run_lark_cli_raw(["auth", "list"], timeout=20, use_global=use_global)
+        except Exception:
+            if attempt == 0:
+                time.sleep(1.5)
+                continue
+            return ""
+        return (stdout or stderr or "").strip()
+    return ""
 
 
 def _feishu_effective_context(config: dict | None) -> dict:
@@ -5056,16 +5087,26 @@ def _create_lark_cli_bitable_base(base_name: str) -> dict:
         raise RuntimeError(_required_user_scope_message(missing_scopes))
     identities = ["user"]
     last_error = ""
+    # 瞬时故障（冷启动超时/网络抖动）重试一次；“返回了但没拿到 token”不重试，避免重复建表
+    identity_attempts = 2
 
     for identity in identities:
-        try:
-            result = _run_lark_cli(
-                ["base", "+base-create", "--as", identity, "--name", name],
-                timeout=30,
-                use_global=use_global,
-            )
-        except Exception as exc:
-            last_error = str(exc)
+        result = None
+        for attempt in range(identity_attempts):
+            try:
+                result = _run_lark_cli(
+                    ["base", "+base-create", "--as", identity, "--name", name],
+                    timeout=30,
+                    use_global=use_global,
+                )
+                break
+            except Exception as exc:
+                last_error = str(exc)
+                result = None
+                if attempt < identity_attempts - 1:
+                    time.sleep(1.5)
+                    continue
+        if result is None:
             continue
 
         base_data = result.get("data", {}).get("base", {}) if isinstance(result, dict) else {}
@@ -5220,8 +5261,22 @@ def _terminate_process_tree(proc, *, requires_user_session: bool = False) -> Non
     poll = getattr(proc, "poll", None)
     if requires_user_session and callable(poll) and poll() is not None:
         return
+    if os.name == "nt":
+        # Windows 下 .cmd 包装使 proc.pid 指向 cmd.exe，proc.terminate() 只杀
+        # 壳进程，node 采集器与 Playwright 浏览器会变成孤儿并继续占用授权
+        # profile；taskkill /T /F 连同子孙进程整树终止（runner 是父进程不受影响）。
+        from core.process import terminate_pid_tree
+
+        terminate_pid_tree(proc.pid, grace_seconds=1.0)
+        wait = getattr(proc, "wait", None)
+        if callable(wait):
+            try:
+                wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                pass
+        return
     try:
-        if os.name != "nt" and not requires_user_session:
+        if not requires_user_session:
             # Batch jobs start with setsid(), so Popen.pid is also their PGID.
             # Kill the group even if the shell leader already exited while a
             # descendant still owns the inherited stdout/stderr pipes.
@@ -5235,7 +5290,7 @@ def _terminate_process_tree(proc, *, requires_user_session: bool = False) -> Non
     except Exception:
         pass
     try:
-        if os.name != "nt" and not requires_user_session:
+        if not requires_user_session:
             os.killpg(proc.pid, signal.SIGKILL)
         else:
             proc.kill()
@@ -6996,7 +7051,17 @@ class Handler(BaseHTTPRequestHandler):
             return ok, stdout, stderr
 
         browser_channel = _sanitize_browser_channel(query.get("browser_channel", [None])[0]) or _configured_browser_channel()
-        backup_dir = _backup_platform_profile(platform_id, browser_channel, reason="startup_failed")
+        try:
+            backup_dir = _backup_platform_profile(platform_id, browser_channel, reason="startup_failed")
+        except OSError as exc:
+            # Windows 上 profile 内文件句柄可能被崩溃残留的浏览器/杀软短暂
+            # 占用，shutil.move 失败不应让自动重建重试整体失效。
+            self._append_log(
+                f"{retry_log_title}_PROFILE_BACKUP_ERROR",
+                f"platform={platform_id}\nchannel={browser_channel}\nerror={exc}\n",
+                "",
+            )
+            return ok, stdout, stderr
         if not backup_dir:
             return ok, stdout, stderr
 
@@ -8427,6 +8492,10 @@ def _start_server():
 
     signal.signal(signal.SIGTERM, _shutdown_on_signal)
     signal.signal(signal.SIGINT, _shutdown_on_signal)
+    if os.name == "nt":
+        # Windows 控制台事件（含 start_monitor 的 CTRL_BREAK）走 SIGBREAK；
+        # 不注册则默认硬终止，unlock/clear_auth_locks 不会执行。
+        signal.signal(signal.SIGBREAK, _shutdown_on_signal)
 
     server = _bind_runner_server(
         RUNNER_HOST,

@@ -83,7 +83,14 @@ def ensure_node_runtime() -> None:
     if not node:
         raise RuntimeError("Node.js 22.12.x is required. Please install Node.js and make sure node/npm/npx are in PATH.")
     try:
-        proc = subprocess.run([node, "--version"], capture_output=True, text=True, timeout=10)
+        proc = subprocess.run(
+            [node, "--version"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=10,
+        )
     except OSError as exc:
         raise RuntimeError(f"Unable to execute Node.js: {exc}") from exc
     match = re.fullmatch(r"v?(\d+)\.(\d+)(?:\.\d+)?(?:[-+].*)?", (proc.stdout or "").strip())
@@ -198,6 +205,8 @@ def _resolve_playwright_chromium_with_node(root_dir: Path) -> Path | None:
             env=env,
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
         )
     except OSError:
         return None

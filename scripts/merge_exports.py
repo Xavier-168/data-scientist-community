@@ -1,6 +1,13 @@
 import argparse
+import os
+import sys
 from pathlib import Path
 import pandas as pd
+
+# 嵌入式 Python（._pth）不会把脚本目录加进 sys.path，需自举以支持同目录导入
+_SELF_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SELF_DIR not in sys.path:
+    sys.path.insert(0, _SELF_DIR)
 
 
 def csvish(value):

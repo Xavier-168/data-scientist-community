@@ -1687,7 +1687,7 @@ def prepare_verified_dmg_snapshot():
 
 def stop_installed_app_processes():
     marker = str(install_app / "Contents" / "Resources" / "app" / "scripts")
-    result = subprocess.run(["ps", "-axo", "pid=,command="], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False)
+    result = subprocess.run(["ps", "-axo", "pid=,command="], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace", check=False)
     pids = []
     for line in result.stdout.splitlines():
         stripped = line.strip()

@@ -334,30 +334,13 @@ def _replace_cli_identity(cmd: list[str], identity: str) -> list[str]:
 
 def run_lark_cli_with_user_fallback(cmd: list[str], *, timeout: int = 120, cwd: Path | None = None):
     # 捕获子进程超时，转为 RuntimeError 避免未处理的 TimeoutExpired 崩溃
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-            env=lark_cli_env(),
-            cwd=str(cwd) if cwd else None,
-        )
-    except subprocess.TimeoutExpired as exc:
-        cmd_summary = " ".join(cmd[:6]) if len(cmd) > 6 else " ".join(cmd)
-        raise RuntimeError(f"lark-cli 命令超时 ({timeout}s): {cmd_summary}") from exc
-    if proc.returncode == 0:
-        return proc
-    detail = "\n".join(part for part in ((proc.stderr or "").strip(), (proc.stdout or "").strip()) if part)
-    if is_cli_bot_permission_error_text(detail):
-        user_cmd = _replace_cli_identity(cmd, "user")
-        if user_cmd != cmd:
+    def _run(command: list[str]) -> subprocess.CompletedProcess:
+        # 仅对进程拉起失败（OSError，如杀软瞬时拦截）重试一次；
+        # 命令已执行但失败/超时不盲目重试，避免写入类操作重复提交
+        for attempt in range(2):
             try:
-                # user fallback 同样需要超时保护
                 return subprocess.run(
-                    user_cmd,
+                    command,
                     capture_output=True,
                     text=True,
                     encoding="utf-8",
@@ -367,8 +350,23 @@ def run_lark_cli_with_user_fallback(cmd: list[str], *, timeout: int = 120, cwd: 
                     cwd=str(cwd) if cwd else None,
                 )
             except subprocess.TimeoutExpired as exc:
-                cmd_summary = " ".join(user_cmd[:6]) if len(user_cmd) > 6 else " ".join(user_cmd)
-                raise RuntimeError(f"lark-cli 命令超时 ({timeout}s, user fallback): {cmd_summary}") from exc
+                cmd_summary = " ".join(command[:6]) if len(command) > 6 else " ".join(command)
+                raise RuntimeError(f"lark-cli 命令超时 ({timeout}s): {cmd_summary}") from exc
+            except OSError:
+                if attempt == 0:
+                    time.sleep(1.5)
+                    continue
+                raise
+
+    proc = _run(cmd)
+    if proc.returncode == 0:
+        return proc
+    detail = "\n".join(part for part in ((proc.stderr or "").strip(), (proc.stdout or "").strip()) if part)
+    if is_cli_bot_permission_error_text(detail):
+        user_cmd = _replace_cli_identity(cmd, "user")
+        if user_cmd != cmd:
+            # user fallback 复用同一执行器（超时保护 + 拉起失败重试）
+            return _run(user_cmd)
     return proc
 
 

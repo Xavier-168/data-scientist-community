@@ -254,6 +254,8 @@ def _git_blob_records(repo: Path) -> Iterator[tuple[str, int, str]]:
         check=True,
         stdout=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     ).stdout
     checked = subprocess.run(
         ["git", "cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize) %(rest)"],
@@ -262,6 +264,8 @@ def _git_blob_records(repo: Path) -> Iterator[tuple[str, int, str]]:
         input=objects,
         stdout=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     ).stdout
     for line in checked.splitlines():
         parts = line.split(" ", 3)
@@ -320,6 +324,8 @@ def scan_git_history(
         check=True,
         stdout=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     ).stdout
     for row in author_emails.splitlines():
         commit, _, email = row.partition("\t")

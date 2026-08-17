@@ -1179,6 +1179,11 @@ impl SidecarSupervisor {
             )
             .env("PYTHONDONTWRITEBYTECODE", "1")
             .env("PYTHONNOUSERSITE", "1")
+            // 嵌入式 Python stdout 管道默认 ANSI 代码页（中文系统 GBK），而
+            // Node 采集器按 utf-8 解析 Python 子进程 JSON 输出；与源码态
+            // start_monitor 的注入保持一致，避免中文键值乱码。
+            .env("PYTHONUTF8", "1")
+            .env("PYTHONIOENCODING", "utf-8")
             .env("YIRENGONGIS_BASE_DIR", &current_root)
             .env("YIRENGONGIS_RUNNER_HOST", "127.0.0.1")
             .env("YIRENGONGIS_RUNNER_PORT", self.preferred_port.to_string())
