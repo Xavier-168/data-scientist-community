@@ -3,6 +3,7 @@ import json
 import mimetypes
 import os
 import pathlib
+import queue
 import shutil
 import signal
 import subprocess
@@ -12,6 +13,7 @@ import threading
 import time
 import traceback
 import glob
+import zipfile
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FutureTimeoutError
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -143,6 +145,102 @@ SUPERVISED_HEALTH_PATH = "/supervised/health"
 RUNNER_READY_PREFIX = "YRG_SIDECAR_READY "
 
 
+_EXCEL_SAVE_DIALOG_SCRIPT = r"""
+on run argv
+    set defaultName to item 1 of argv
+    set selectedFile to choose file name with prompt "选择 Excel 保存位置" default location (path to downloads folder) default name defaultName
+    return POSIX path of selectedFile
+end run
+"""
+
+
+def _run_excel_save_dialog(default_filename: str) -> dict:
+    """Open the native macOS Save As panel without interpolating user text into AppleScript."""
+    safe_name = os.path.basename(str(default_filename or "数据汇总.xlsx").strip()) or "数据汇总.xlsx"
+    try:
+        completed = subprocess.run(
+            ["/usr/bin/osascript", "-e", _EXCEL_SAVE_DIALOG_SCRIPT, safe_name],
+            capture_output=True,
+            text=True,
+            timeout=600,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {
+            "ok": False,
+            "cancelled": False,
+            "error": "excel_save_dialog_failed",
+            "message": "打开 Excel 保存窗口失败，请稍后重试。",
+            "detail": str(exc),
+        }
+
+    stderr = str(completed.stderr or "").strip()
+    if completed.returncode != 0:
+        cancelled = "-128" in stderr or "user canceled" in stderr.lower() or "用户取消" in stderr
+        if cancelled:
+            return {"ok": True, "cancelled": True, "message": "已取消保存"}
+        return {
+            "ok": False,
+            "cancelled": False,
+            "error": "excel_save_dialog_failed",
+            "message": "打开 Excel 保存窗口失败，请稍后重试。",
+            "detail": stderr,
+        }
+
+    selected_path = str(completed.stdout or "").strip()
+    if not selected_path or "\x00" in selected_path:
+        return {
+            "ok": False,
+            "cancelled": False,
+            "error": "excel_save_path_invalid",
+            "message": "没有获得有效的 Excel 保存位置，请重新选择。",
+        }
+    return {"ok": True, "cancelled": False, "path": selected_path}
+
+
+def _is_valid_xlsx_file(file_path: str) -> bool:
+    try:
+        if not zipfile.is_zipfile(file_path):
+            return False
+        with zipfile.ZipFile(file_path, "r") as workbook:
+            members = set(workbook.namelist())
+            return {"[Content_Types].xml", "xl/workbook.xml"}.issubset(members)
+    except (OSError, zipfile.BadZipFile, zipfile.LargeZipFile):
+        return False
+
+
+def _save_excel_to_selected_path(source_path: str, selected_path: str) -> str:
+    """Copy a verified XLSX to the user-selected destination using atomic replacement."""
+    source = os.path.abspath(str(source_path or ""))
+    destination = os.path.abspath(os.path.expanduser(str(selected_path or "").strip()))
+    if not destination.lower().endswith(".xlsx"):
+        destination += ".xlsx"
+    if not os.path.isfile(source):
+        raise FileNotFoundError("excel_source_missing")
+    if not _is_valid_xlsx_file(source):
+        raise ValueError("excel_source_invalid")
+    parent = os.path.dirname(destination)
+    if not parent or not os.path.isdir(parent):
+        raise FileNotFoundError("excel_destination_directory_missing")
+    if os.path.isdir(destination):
+        raise IsADirectoryError("excel_destination_is_directory")
+
+    descriptor, temp_path = tempfile.mkstemp(prefix=".excel-export-", suffix=".tmp", dir=parent)
+    try:
+        with os.fdopen(descriptor, "wb") as target, open(source, "rb") as source_file:
+            shutil.copyfileobj(source_file, target)
+            target.flush()
+            os.fsync(target.fileno())
+        os.replace(temp_path, destination)
+    except Exception:
+        try:
+            os.remove(temp_path)
+        except FileNotFoundError:
+            pass
+        raise
+    return destination
+
+
 def _is_tauri_supervised() -> bool:
     return str(os.environ.get("YIRENGONGIS_SUPERVISED_BY_TAURI") or "").strip() == "1"
 
@@ -185,6 +283,11 @@ AUTH_HEALTH_PROBE_TIMEOUT_SECONDS = _positive_env_seconds("YIRENGONGIS_AUTH_HEAL
 AUTH_HEALTH_SCAN_WAIT_MS = _positive_env_seconds("YIRENGONGIS_AUTH_HEALTH_SCAN_WAIT_MS", 10000, 5000)
 AUTH_HEALTH_TICK_SECONDS = _positive_env_seconds("YIRENGONGIS_AUTH_HEALTH_TICK", 60, 5)
 AUTH_HEALTH_STARTUP_SPACING_SECONDS = _positive_env_seconds("YIRENGONGIS_AUTH_HEALTH_STARTUP_SPACING", 5, 0)
+COLLECTION_DOUYIN_RETRY_DELAY_SECONDS = _positive_env_seconds(
+    "YIRENGONGIS_DOUYIN_RETRY_DELAY",
+    20,
+    0,
+)
 _AUTH_HEALTH_STOP_EVENT = threading.Event()
 _AUTH_HEALTH_THREAD = None
 _AUTH_HEALTH_ACTIVE_PLATFORM = ""
@@ -976,6 +1079,20 @@ def _platform_completed_without_output(progress_path: str) -> bool:
         and int(progress.get("failedWorks") or 0) == 0
     )
 
+
+def _is_promotable_douyin_partial_failure(progress_path: str) -> bool:
+    progress = read_json_file(progress_path, {})
+    try:
+        success_works = int(progress.get("successWorks") or 0)
+    except (TypeError, ValueError):
+        return False
+    return bool(
+        str(progress.get("status") or "").strip().lower() == "failed"
+        and str(progress.get("error") or "").strip().lower() == "partial_failure"
+        and success_works > 0
+    )
+
+
 AUTH_SINGLE_PLATFORM_MAP = {
     "douyin": (RUN_SCRIPT, DOUYIN_PROGRESS_FILE),
     "xiaohongshu": (RUN_XHS_SCRIPT, XHS_PROGRESS_FILE),
@@ -1415,6 +1532,15 @@ def _resolve_node_bin_for_env(env: dict) -> str:
     if explicit:
         return explicit
     return resolve_default_node_bin(str((env or {}).get("PATH") or ""))
+
+
+def _collector_runtime_preflight_error(base_dir: str | None = None) -> str:
+    """Return a stable error code when an exported collector runtime is incomplete."""
+    runtime_root = os.path.abspath(base_dir or BASE_DIR)
+    playwright_package = os.path.join(runtime_root, "node_modules", "playwright", "package.json")
+    if not os.path.isfile(playwright_package):
+        return "playwright_not_installed"
+    return ""
 
 
 def load_auth_state() -> dict:
@@ -4398,6 +4524,90 @@ def _extract_feishu_console_url(detail: str) -> str:
     return match.group(1) if match else ""
 
 
+
+
+def _consume_lark_cli_output(proc, on_line, *, timeout_seconds: float = 300.0) -> None:
+    """Consume interactive CLI output without letting a silent child block forever."""
+    events: queue.Queue = queue.Queue()
+    eof_marker = object()
+
+    def reader() -> None:
+        try:
+            if proc.stdout is not None:
+                for line in proc.stdout:
+                    events.put(line)
+        except Exception as exc:
+            events.put(exc)
+        finally:
+            events.put(eof_marker)
+
+    reader_thread = threading.Thread(target=reader, daemon=True, name="lark_cli_stdout")
+    reader_thread.start()
+    deadline = time.monotonic() + max(0.1, float(timeout_seconds))
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            proc.kill()
+            try:
+                proc.wait(timeout=5)
+            except Exception:
+                pass
+            reader_thread.join(timeout=1)
+            if proc.stdout is not None:
+                proc.stdout.close()
+            raise subprocess.TimeoutExpired(getattr(proc, "args", "lark-cli"), timeout_seconds)
+        try:
+            item = events.get(timeout=min(0.25, remaining))
+        except queue.Empty:
+            if proc.poll() is not None and not reader_thread.is_alive():
+                break
+            continue
+        if item is eof_marker:
+            break
+        if isinstance(item, BaseException):
+            raise item
+        on_line(str(item))
+
+    remaining = deadline - time.monotonic()
+    try:
+        proc.wait(timeout=max(0.1, remaining))
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+        raise
+    finally:
+        reader_thread.join(timeout=1)
+        if proc.stdout is not None:
+            proc.stdout.close()
+
+
+def _open_trusted_feishu_verification_url(url: str) -> bool:
+    """Open only the trusted Feishu CLI verification page in the user's browser."""
+    target = str(url or "").strip()
+    try:
+        parsed = urlparse(target)
+    except Exception:
+        return False
+    if parsed.scheme != "https" or parsed.hostname != "open.feishu.cn" or parsed.path != "/page/cli":
+        return False
+    if sys.platform != "darwin":
+        return False
+    try:
+        subprocess.Popen(
+            ["/usr/bin/open", target],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            start_new_session=True,
+        )
+        return True
+    except (OSError, subprocess.SubprocessError):
+        return False
+
+
 def _start_lark_cli_user_auth(trigger_reason: str = "") -> dict:
     global _LARK_CLI_STATE
     with _LARK_CLI_LOCK:
@@ -4500,6 +4710,8 @@ def _run_lark_cli_user_auth_flow(
                 "device_code": device_code,
             }
         )
+
+    _open_trusted_feishu_verification_url(captured_url)
 
     complete_output = ""
     try:
@@ -4662,31 +4874,38 @@ def _lark_cli_connect_worker(
                 text=True, encoding="utf-8", errors="replace",
             )
 
-            # Stream stdout to capture verification URL as soon as it appears
+            # Stream stdout to capture verification URL as soon as it appears.
+            # The reader is supervised by an effective deadline; a silent CLI can no longer
+            # leave the onboarding spinner alive forever.
             captured_url = ""
             all_output = []
-            try:
-                for line in proc.stdout:
-                    all_output.append(line)
-                    m = _re.search(r'(https://open\.feishu\.cn/\S+)', line)
-                    if m and not captured_url:
-                        captured_url = m.group(1)
-                        with _LARK_CLI_LOCK:
-                            _LARK_CLI_STATE["phase"] = "scan_qr"
-                            _LARK_CLI_STATE["verification_url"] = captured_url
-                            _LARK_CLI_STATE["message"] = "正在创建飞书 CLI 应用。若开放平台显示“创建成功”，请回到本工具继续下一步用户授权。"
-                            _LARK_CLI_STATE["error"] = ""
-            except Exception:
-                pass
+
+            def handle_cli_line(line: str) -> None:
+                nonlocal captured_url
+                all_output.append(line)
+                m = _re.search(r'(https://open\.feishu\.cn/\S+)', line)
+                if m and not captured_url:
+                    captured_url = m.group(1)
+                    with _LARK_CLI_LOCK:
+                        _LARK_CLI_STATE["phase"] = "scan_qr"
+                        _LARK_CLI_STATE["verification_url"] = captured_url
+                        _LARK_CLI_STATE["message"] = "飞书登录页面已生成；浏览器未自动打开时，请点击页面中的登录按钮。"
+                        _LARK_CLI_STATE["error"] = ""
+                    _open_trusted_feishu_verification_url(captured_url)
 
             try:
-                proc.wait(timeout=300)
+                _consume_lark_cli_output(proc, handle_cli_line, timeout_seconds=300)
             except subprocess.TimeoutExpired:
-                proc.kill()
                 with _LARK_CLI_LOCK:
                     _LARK_CLI_STATE["phase"] = "error"
                     _LARK_CLI_STATE["error"] = "飞书登录超时（5分钟），请重试。"
                 return
+            except Exception as exc:
+                all_output.append(str(exc))
+                try:
+                    proc.kill()
+                except Exception:
+                    pass
 
             if proc.returncode != 0:
                 output_text = "".join(all_output).strip()
@@ -5902,7 +6121,13 @@ class Handler(BaseHTTPRequestHandler):
             self._append_log(f"RUN_{name.upper()}", stdout, stderr)
             ok = proc.returncode == 0 and getattr(proc, "outcome", "success") == "success"
             fresh_output = False
+            partial_promotion_error = ""
             completed_empty = ok and _platform_completed_without_output(progress_path)
+            partial_failure = (
+                not ok
+                and name == "douyin"
+                and _is_promotable_douyin_partial_failure(progress_path)
+            )
             if ok:
                 if completed_empty:
                     _stage_completed_empty_artifacts(name, artifact_mapping)
@@ -5914,6 +6139,20 @@ class Handler(BaseHTTPRequestHandler):
                     workspace,
                     artifact_mapping,
                 )
+            elif partial_failure:
+                try:
+                    fresh_output = _promote_platform_artifacts(
+                        name,
+                        workspace,
+                        artifact_mapping,
+                    )
+                except Exception as exc:
+                    partial_promotion_error = str(exc) or repr(exc)
+                    self._append_log(
+                        "RUN_DOUYIN_PARTIAL_PROMOTION_ERROR",
+                        "",
+                        partial_promotion_error,
+                    )
             _finalize_platform_progress(
                 name,
                 progress_path,
@@ -5927,7 +6166,15 @@ class Handler(BaseHTTPRequestHandler):
             outcome = (
                 "completed_empty"
                 if completed_empty
-                else ("success" if ok else str(getattr(proc, "outcome", "failed") or "failed"))
+                else (
+                    "success"
+                    if ok
+                    else (
+                        "partial_failure"
+                        if partial_failure
+                        else str(getattr(proc, "outcome", "failed") or "failed")
+                    )
+                )
             )
             return PlatformResult(
                 platform=name,
@@ -5936,7 +6183,15 @@ class Handler(BaseHTTPRequestHandler):
                 returncode=int(proc.returncode or 0),
                 fresh_output=fresh_output,
                 duration_seconds=round(time.monotonic() - started, 3),
-                error_message="" if ok else (stderr.strip() or outcome),
+                error_message=(
+                    ""
+                    if ok
+                    else (
+                        f"partial_artifact_promotion_failed:{partial_promotion_error}"
+                        if partial_promotion_error
+                        else (stderr.strip() or outcome)
+                    )
+                ),
                 started=True,
             )
         except Exception as exc:
@@ -5974,6 +6229,7 @@ class Handler(BaseHTTPRequestHandler):
             [step[0] for step in platform_steps],
             run_one,
             max_workers=COLLECTION_MAX_WORKERS,
+            retry_delays={"douyin": COLLECTION_DOUYIN_RETRY_DELAY_SECONDS},
         )
 
     def _execute_run_all(self, query, *, start: float, started_at: str, run_id: str) -> dict:
@@ -6878,6 +7134,66 @@ class Handler(BaseHTTPRequestHandler):
         self._refresh_live_auth_state_before_run(path, query)
         return _blocked_run_request_payload(path, query)
 
+
+    def _prepare_excel_export_file(self, which: str, requested_platforms: list[str]) -> tuple[str, dict | None]:
+        enriched_map = {
+            "all": ENRICHED_ALL_DATA_FILE,
+            **ENRICHED_PLATFORM_FILES,
+        }
+        raw_map = {
+            "all": ALL_DATA_FILE,
+            "douyin": DATA_FILE,
+            "xiaohongshu": XHS_DATA_FILE,
+            "bilibili": BILI_DATA_FILE,
+            "kuaishou": KS_DATA_FILE,
+        }
+        if which == "all" and requested_platforms:
+            config = load_saved_config()
+            excel_cmd = [
+                PYTHON_BIN,
+                BUILD_EXCEL_SCRIPT,
+                "--mode",
+                "all",
+                "--platforms",
+                ",".join(requested_platforms),
+                "--output",
+                ENRICHED_ALL_DATA_FILE,
+            ]
+            chosen_min_date = str(config.get("min_publish_date") or DEFAULT_CONFIG["min_publish_date"]).strip()
+            if chosen_min_date:
+                excel_cmd.extend(["--min-date", chosen_min_date])
+            rebuild_proc = self._run_script(excel_cmd, os.environ.copy(), timeout=180)
+            rebuild_stdout, rebuild_stderr = self._get_proc_output(rebuild_proc)
+            self._append_log("DOWNLOAD_EXCEL_REBUILD", rebuild_stdout, rebuild_stderr)
+            if rebuild_proc.returncode != 0:
+                return "", {
+                    "ok": False,
+                    "error": "download_excel_rebuild_failed",
+                    "message": "按当前平台配置生成 Excel 失败，请先完成一次同步后再导出。",
+                    "detail": _process_failure_detail(
+                        rebuild_stdout,
+                        rebuild_stderr,
+                        "请查看 DOWNLOAD_EXCEL_REBUILD 日志。",
+                    ),
+                }
+
+        target = enriched_map.get(which, "")
+        if not target or not os.path.exists(target):
+            target = raw_map.get(which, "")
+        if not target or not os.path.isfile(target):
+            return "", {
+                "ok": False,
+                "error": "excel_not_ready",
+                "message": "暂时没有可导出的 Excel，请先完成一次数据采集。",
+            }
+        if not _is_valid_xlsx_file(target):
+            return "", {
+                "ok": False,
+                "error": "excel_file_invalid",
+                "message": "Excel 文件校验失败，请重新完成一次数据采集。",
+            }
+        return target, None
+
     def do_GET(self):
         parsed = urlparse(self.path)
         if not self._require_request_security():
@@ -6906,54 +7222,25 @@ class Handler(BaseHTTPRequestHandler):
         # --- 文件下载端点 ---
         if parsed.path == "/download-excel":
             qs = parse_qs(parsed.query)
-            which = qs.get("file", ["all"])[0]
-            # Prefer enriched files, fall back to raw
-            enriched_map = {
-                "all": ENRICHED_ALL_DATA_FILE,
-                **ENRICHED_PLATFORM_FILES,
-            }
-            raw_map = {
-                "all": ALL_DATA_FILE,
-                "douyin": DATA_FILE,
-                "xiaohongshu": XHS_DATA_FILE,
-                "bilibili": BILI_DATA_FILE,
-                "kuaishou": KS_DATA_FILE,
-            }
-            if which == "all":
-                requested_platforms = _normalize_platform_ids(_query_value(qs, "platforms", ""))
-                if requested_platforms:
-                    config = load_saved_config()
-                    excel_cmd = [
-                        PYTHON_BIN,
-                        BUILD_EXCEL_SCRIPT,
-                        "--mode",
-                        "all",
-                        "--platforms",
-                        ",".join(requested_platforms),
-                        "--output",
-                        ENRICHED_ALL_DATA_FILE,
-                    ]
-                    chosen_min_date = str(config.get("min_publish_date") or DEFAULT_CONFIG["min_publish_date"]).strip()
-                    if chosen_min_date:
-                        excel_cmd.extend(["--min-date", chosen_min_date])
-                    rebuild_proc = self._run_script(excel_cmd, os.environ.copy(), timeout=180)
-                    rebuild_stdout, rebuild_stderr = self._get_proc_output(rebuild_proc)
-                    self._append_log("DOWNLOAD_EXCEL_REBUILD", rebuild_stdout, rebuild_stderr)
-                    if rebuild_proc.returncode != 0:
-                        self._send_json(
-                            500,
-                            {
-                                "ok": False,
-                                "error": "download_excel_rebuild_failed",
-                                "message": "按当前平台配置生成 Excel 失败，请先完成一次同步后再导出。",
-                                "detail": _process_failure_detail(rebuild_stdout, rebuild_stderr, "请查看 DOWNLOAD_EXCEL_REBUILD 日志。"),
-                            },
-                        )
-                        return
-            target = enriched_map.get(which, "")
-            if not target or not os.path.exists(target):
-                target = raw_map.get(which, ALL_DATA_FILE)
-            self._send_file(target, "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", as_download=True)
+            which = str(qs.get("file", ["all"])[0] or "all").strip()
+            if which not in {"all", *VALID_PLATFORM_IDS}:
+                self._send_json(
+                    400,
+                    {"ok": False, "error": "excel_scope_invalid", "message": "Excel 数据范围无效。"},
+                )
+                return
+            requested_platforms = _normalize_platform_ids(_query_value(qs, "platforms", ""))
+            if which != "all":
+                requested_platforms = []
+            target, error = self._prepare_excel_export_file(which, requested_platforms)
+            if error:
+                self._send_json(500, error)
+                return
+            self._send_file(
+                target,
+                "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                as_download=True,
+            )
             return
 
         if parsed.path.startswith("/assets/"):
@@ -7125,6 +7412,7 @@ class Handler(BaseHTTPRequestHandler):
             "/auth_revoke_single",
             "/config",
             "/config/test_feishu",
+            "/export-excel",
             "/reset_onboarding",
             "/sync_feishu",
             "/unlock",
@@ -7142,6 +7430,67 @@ class Handler(BaseHTTPRequestHandler):
             "/update/reveal",
         ):
             self._send_json(404, {"ok": False, "error": "not_found"})
+            return
+
+        if parsed.path == "/export-excel":
+            try:
+                payload = self._read_json_body()
+                which = str(payload.get("file") or "all").strip()
+                if which not in {"all", *VALID_PLATFORM_IDS}:
+                    self._send_json(
+                        400,
+                        {"ok": False, "error": "excel_scope_invalid", "message": "Excel 数据范围无效。"},
+                    )
+                    return
+                requested_platforms = _normalize_platform_ids(payload.get("platforms") or [])
+                if which != "all":
+                    requested_platforms = []
+                target, prepare_error = self._prepare_excel_export_file(which, requested_platforms)
+                if prepare_error:
+                    self._send_json(500, prepare_error)
+                    return
+
+                dialog_result = _run_excel_save_dialog(os.path.basename(target))
+                if dialog_result.get("cancelled"):
+                    self._send_json(200, {"ok": True, "cancelled": True, "message": "已取消保存"})
+                    return
+                if not dialog_result.get("ok"):
+                    self._append_log(
+                        "EXPORT_EXCEL_SAVE_DIALOG_ERROR",
+                        "",
+                        str(dialog_result.get("detail") or dialog_result.get("error") or "unknown"),
+                    )
+                    self._send_json(
+                        500,
+                        {
+                            "ok": False,
+                            "error": str(dialog_result.get("error") or "excel_save_dialog_failed"),
+                            "message": str(dialog_result.get("message") or "打开 Excel 保存窗口失败，请稍后重试。"),
+                        },
+                    )
+                    return
+
+                saved_path = _save_excel_to_selected_path(target, str(dialog_result.get("path") or ""))
+                self._append_log("EXPORT_EXCEL_SAVED", saved_path, "")
+                self._send_json(
+                    200,
+                    {
+                        "ok": True,
+                        "cancelled": False,
+                        "path": saved_path,
+                        "file_name": os.path.basename(saved_path),
+                    },
+                )
+            except Exception as exc:
+                self._append_log("EXPORT_EXCEL_ERROR", "", str(exc))
+                self._send_json(
+                    500,
+                    {
+                        "ok": False,
+                        "error": "excel_export_failed",
+                        "message": "Excel 保存失败，请重新选择位置后再试。",
+                    },
+                )
             return
 
         # --- Lark CLI endpoints (no lock required) ---
@@ -7334,6 +7683,16 @@ class Handler(BaseHTTPRequestHandler):
             script, progress_path = AUTH_SINGLE_PLATFORM_MAP[platform]
             if not os.path.exists(script):
                 self._send_json(404, {"ok": False, "error": "script_not_found", "platform": platform})
+                return
+
+            runtime_error = _collector_runtime_preflight_error()
+            if runtime_error:
+                self._send_json(503, {
+                    "ok": False,
+                    "error": runtime_error,
+                    "platform": platform,
+                    "message": "采集运行依赖尚未安装，请在项目目录执行 npm install 后重新授权。",
+                })
                 return
 
             with RUN_MUTEX:

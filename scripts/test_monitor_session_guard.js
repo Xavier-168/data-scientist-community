@@ -9,6 +9,10 @@ const MONITOR_THEME_CSS = fs.readFileSync(
   path.resolve(__dirname, "..", "frontend", "assets", "progress-apple-theme.css"),
   "utf8"
 );
+const MONITOR_FIGMA_CSS = fs.readFileSync(
+  path.resolve(__dirname, "..", "frontend", "assets", "progress-figma-dashboard.css"),
+  "utf8"
+);
 
 function buildProgress({ enabledPlatforms = [], setupComplete = false, authOverrides = {} } = {}) {
   function idleProgress(platform, enabled) {
@@ -91,6 +95,11 @@ async function withServer(handlers, callback) {
       res.end(MONITOR_THEME_CSS);
       return;
     }
+    if (url.pathname === "/assets/progress-figma-dashboard.css") {
+      res.writeHead(200, { "Content-Type": "text/css; charset=utf-8" });
+      res.end(MONITOR_FIGMA_CSS);
+      return;
+    }
 
     if (url.pathname === "/progress") {
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
@@ -163,7 +172,12 @@ async function withServer(handlers, callback) {
 }
 
 async function withPage(callback) {
-  const browser = await chromium.launch({ headless: true });
+  const executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH
+    || (process.platform === "darwin" ? "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" : "");
+  const browser = await chromium.launch({
+    headless: true,
+    ...(executablePath && fs.existsSync(executablePath) ? { executablePath } : {}),
+  });
   const page = await browser.newPage();
   try {
     await callback(page);

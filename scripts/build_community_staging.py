@@ -30,6 +30,13 @@ RUNTIME_FILES = (
     "frontend/loading.html",
     "frontend/progress.html",
     "frontend/assets/progress-apple-theme.css",
+    "frontend/assets/progress-figma-dashboard.css",
+    "frontend/assets/figma/mailbox.svg",
+    "frontend/assets/fonts/NotoSerifSC-Variable.ttf",
+    "frontend/assets/fonts/NotoSerifSC-OFL.txt",
+    "frontend/assets/platforms/bilibili.svg",
+    "frontend/assets/platforms/douyin.svg",
+    "frontend/assets/platforms/kuaishou.svg",
     "frontend/assets/vendor/tabler/LICENSE",
     "frontend/assets/vendor/tabler/walk.svg",
 )

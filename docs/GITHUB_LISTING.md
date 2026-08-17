@@ -28,23 +28,27 @@ English: `Local-first creator data collection, Excel export, and optional Feishu
 
 使用候选仓库中的原创社区占位图标，配合纯文字标题“数据科学家 Community”和副标题“Local-first creator analytics”。不使用四个平台或飞书 Logo，不写“官方”“授权”“完全合规”、虚构用户数、虚构准确率或未执行的测试徽章。
 
-## 首个 Release 标题
+## 当前 Release 标题
 
-`v0.1.0-rc.1 — Community Source Release Candidate`
+`v0.1.0-rc.2 — Collection Integrity & Native Export Fixes`
 
-## 首个 Release 正文
+## 当前 Release 正文
 
 ```markdown
-## Data Scientist Community v0.1.0-rc.1
+## Data Scientist Community v0.1.0-rc.2
 
-这是首个社区源码候选，面向需要在自己的 Mac 上整理自己有权访问的创作者数据的用户。本项目是独立社区项目，与抖音、小红书、哔哩哔哩、快手、飞书及其关联公司不存在官方合作、授权或背书关系。
+这是社区源码候选的第二轮稳定性修复，重点处理四平台采集完整性、B站官方批次与进度、抖音长任务恢复、macOS 原生 Excel 保存、飞书首次初始化和 Figma 仪表盘布局。本项目是独立社区项目，与抖音、小红书、哔哩哔哩、快手、飞书及其关联公司不存在官方合作、授权或背书关系。
 
-### 本次包含
+### 重点修复
 
-- 抖音、小红书、B站、快手四个平台的本地采集入口；
-- 数据规范化、Excel 导出、本地分析和运行历史；
-- 由用户自行配置并主动触发的可选飞书多维表格同步；
-- Vanilla HTML 仪表盘、Tauri/React 桌面壳源码、公开文档、SBOM 和白名单导出证据。
+- B站按日期锁定目标、真实滚动确认、有效官方批次导出和单调进度；
+- 抖音分页慢响应保护、瞬态重试和部分结果保留；
+- 小红书、快手页面滚动与接口分页双重确认；
+- 应用内 Excel 范围选择与 macOS 系统保存窗口；
+- 飞书首次初始化的自动打开、可信 URL 限制和明确超时；
+- 1920 × 1080 设计基线下统一缩放的本地仪表盘。
+
+完整修复、验证结果、升级步骤与人工边界见 [v0.1.0-rc.2 发布说明](https://github.com/Xavier-168/data-scientist-community/blob/main/docs/RELEASE_NOTES_v0.1.0-rc.2.md)。
 
 ### 本地数据与登录态
 

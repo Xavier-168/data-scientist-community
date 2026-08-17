@@ -47,6 +47,51 @@ class CollectionSchedulerTests(unittest.TestCase):
         self.assertEqual(results["douyin"].outcome, "success")
         self.assertEqual(attempts["douyin"], 2)
 
+    def test_retryable_douyin_failure_waits_before_second_attempt(self):
+        events = []
+
+        def run_one(platform):
+            events.append(f"run:{platform}")
+            if events.count(f"run:{platform}") == 1:
+                return PlatformResult(platform=platform, outcome="failed", retryable=True)
+            return PlatformResult(platform=platform, outcome="success")
+
+        results = run_bounded(
+            ["douyin"],
+            run_one,
+            max_workers=2,
+            retry_delays={"douyin": 20},
+            sleep_fn=lambda seconds: events.append(f"sleep:{seconds:g}"),
+        )
+
+        self.assertEqual(results["douyin"].outcome, "success")
+        self.assertEqual(events, ["run:douyin", "sleep:20", "run:douyin"])
+
+    def test_douyin_partial_failure_is_not_delayed_or_retried(self):
+        events = []
+
+        def run_one(platform):
+            events.append(f"run:{platform}")
+            return PlatformResult(
+                platform=platform,
+                outcome="partial_failure",
+                retryable=False,
+                fresh_output=True,
+            )
+
+        results = run_bounded(
+            ["douyin"],
+            run_one,
+            max_workers=2,
+            retry_delays={"douyin": 20},
+            sleep_fn=lambda seconds: events.append(f"sleep:{seconds:g}"),
+        )
+
+        self.assertEqual(results["douyin"].outcome, "partial_failure")
+        self.assertTrue(results["douyin"].fresh_output)
+        self.assertEqual(results["douyin"].attempts, 1)
+        self.assertEqual(events, ["run:douyin"])
+
     def test_non_retryable_failure_is_not_repeated(self):
         attempts = collections.Counter()
 

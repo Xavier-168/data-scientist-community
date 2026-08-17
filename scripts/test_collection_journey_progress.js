@@ -8,10 +8,22 @@ const vm = require('vm');
 const ROOT = path.resolve(__dirname, '..');
 const HTML_PATH = path.join(ROOT, 'frontend', 'progress.html');
 const CSS_PATH = path.join(ROOT, 'frontend', 'assets', 'progress-apple-theme.css');
+const FIGMA_CSS_PATH = path.join(ROOT, 'frontend', 'assets', 'progress-figma-dashboard.css');
 const WALK_ICON_PATH = path.join(ROOT, 'frontend', 'assets', 'vendor', 'tabler', 'walk.svg');
+const MAILBOX_ICON_PATH = path.join(ROOT, 'frontend', 'assets', 'figma', 'mailbox.svg');
+const FIGMA_FONT_PATH = path.join(ROOT, 'frontend', 'assets', 'fonts', 'NotoSerifSC-Variable.ttf');
 const html = fs.readFileSync(HTML_PATH, 'utf8');
 const css = fs.readFileSync(CSS_PATH, 'utf8');
+const figmaCss = fs.readFileSync(FIGMA_CSS_PATH, 'utf8');
 const walkIcon = fs.readFileSync(WALK_ICON_PATH, 'utf8');
+const mailboxIcon = fs.readFileSync(MAILBOX_ICON_PATH, 'utf8');
+const figmaFont = fs.readFileSync(FIGMA_FONT_PATH);
+const platformIcons = Object.fromEntries(
+  ['douyin', 'bilibili', 'kuaishou'].map((name) => [
+    `/assets/platforms/${name}.svg`,
+    fs.readFileSync(path.join(ROOT, 'frontend', 'assets', 'platforms', `${name}.svg`), 'utf8'),
+  ]),
+);
 let chromium;
 try {
   ({ chromium } = require('playwright'));
@@ -177,13 +189,25 @@ function verifyStaticContract() {
   assert(html.includes('role="progressbar"'), 'journey should expose an accessible progressbar role');
   assert(html.includes('LIVE COLLECTION'), 'running card should use the approved Figma kicker');
   assert(html.includes('正在采集平台数据'), 'running card should use the approved Figma title');
-  assert(html.includes('task-progress-label">PROGRESS'), 'running card should use the approved horizontal progress badge');
+  assert(html.includes('task-progress-label">进度'), 'running card should use the approved Chinese progress label');
+  assert(html.includes('id="task-baseline-range"'), 'running card should expose the synchronization baseline');
+  assert(html.includes('id="task-current-platform"'), 'running card should expose the current platform');
+  assert(html.includes('class="platform-table-shell"'), 'dashboard should use the approved Figma table projection');
+  assert(figmaCss.includes('--figma-shadow: 1px 1px 1px'), 'small dashboard components should use the global 1/1/1 shadow rule');
+  assert(figmaCss.includes('@keyframes collectionStatusFlow'), 'running collection status should keep its internal motion');
   assert(html.includes('/assets/vendor/tabler/walk.svg'), 'walker should use the vendored Tabler walk icon');
   assert(!html.includes('task-walker-figure'), 'walker should not use a handcrafted inline SVG');
   assert(css.includes('@keyframes taskWalkerStep'), 'walker should include a restrained step animation');
   assert(css.includes('@media (prefers-reduced-motion: reduce)'), 'walker should respect reduced-motion preferences');
   assert(html.includes('COLLECTION_JOURNEY_ANIMATION_MS = 2800'), 'journey should interpolate across the backend polling window');
   assert(html.includes('elapsed / COLLECTION_JOURNEY_ANIMATION_MS'), 'journey interpolation should use a linear time ratio');
+  assert(html.includes('DASHBOARD_DESIGN_WIDTH = 1920'), 'dashboard should retain the approved Figma desktop width as its scale baseline');
+  assert(html.includes('DASHBOARD_DESIGN_HEIGHT = 1080'), 'dashboard should retain the approved Figma desktop height as its scale baseline');
+  assert(html.includes('id="viewport-stage"'), 'dashboard should use a dedicated letterbox stage');
+  assert(html.includes('/assets/figma/mailbox.svg'), 'sidebar should use the exact editable Figma mailbox asset');
+  assert(figmaCss.includes('fonts/NotoSerifSC-Variable.ttf'), 'Figma projection should use the vendored OFL Noto Serif SC file');
+  assert(html.includes('applyDashboardViewportScale();'), 'dashboard should scale the full design canvas before rendering');
+  assert(!figmaCss.includes('@media (max-width: 1500px)'), 'narrow native windows must not trigger a hybrid partial redesign');
   assert(!html.includes('progressbar.js'), 'the production page should not add an external progress dependency');
 
   const componentCss = css.slice(css.indexOf('/* Task Current Status Pane */'), css.indexOf('/* Product Mailbox */'));
@@ -222,9 +246,29 @@ async function verifyBrowserRender() {
       res.end(css);
       return;
     }
+    if (url.pathname === '/assets/progress-figma-dashboard.css') {
+      res.writeHead(200, { 'Content-Type': 'text/css; charset=utf-8' });
+      res.end(figmaCss);
+      return;
+    }
     if (url.pathname === '/assets/vendor/tabler/walk.svg') {
       res.writeHead(200, { 'Content-Type': 'image/svg+xml; charset=utf-8' });
       res.end(walkIcon);
+      return;
+    }
+    if (url.pathname === '/assets/figma/mailbox.svg') {
+      res.writeHead(200, { 'Content-Type': 'image/svg+xml; charset=utf-8' });
+      res.end(mailboxIcon);
+      return;
+    }
+    if (url.pathname === '/assets/fonts/NotoSerifSC-Variable.ttf') {
+      res.writeHead(200, { 'Content-Type': 'font/ttf' });
+      res.end(figmaFont);
+      return;
+    }
+    if (platformIcons[url.pathname]) {
+      res.writeHead(200, { 'Content-Type': 'image/svg+xml; charset=utf-8' });
+      res.end(platformIcons[url.pathname]);
       return;
     }
     if (url.pathname === '/license') return sendJson({ valid: true, activated: true, customer_name: config.customer_name });
@@ -243,7 +287,7 @@ async function verifyBrowserRender() {
     headless: true,
     ...(executablePath ? { executablePath } : {}),
   });
-  const page = await browser.newPage({ viewport: { width: 1600, height: 1000 }, deviceScaleFactor: 1 });
+  const page = await browser.newPage({ viewport: { width: 1920, height: 1080 }, deviceScaleFactor: 1 });
   try {
     await page.goto(`http://127.0.0.1:${server.address().port}/monitor#session=test-session`, { waitUntil: 'networkidle' });
     await page.locator('#dash-task-pane.active.is-running').waitFor();
@@ -272,72 +316,128 @@ async function verifyBrowserRender() {
       const pane = document.querySelector('#dash-task-pane').getBoundingClientRect();
       const track = document.querySelector('.task-route-track').getBoundingClientRect();
       const fill = document.querySelector('#task-route-fill').getBoundingClientRect();
-      const walker = document.querySelector('#task-walker').getBoundingClientRect();
-      const start = document.querySelector('.task-route-start').getBoundingClientRect();
-      const finish = document.querySelector('.task-route-finish').getBoundingClientRect();
+      const baseline = document.querySelector('.task-baseline-block').getBoundingClientRect();
+      const current = document.querySelector('.task-current-block').getBoundingClientRect();
       const score = document.querySelector('.task-progress-score').getBoundingClientRect();
+      const table = document.querySelector('.platform-table-shell').getBoundingClientRect();
+      const tableHead = document.querySelector('.platform-table-head').getBoundingClientRect();
+      const firstRow = document.querySelector('.platform-table-row').getBoundingClientRect();
+      const appStyle = getComputedStyle(document.querySelector('#app'));
       const paneStyle = getComputedStyle(document.querySelector('#dash-task-pane'));
-      const dividerStyle = getComputedStyle(document.querySelector('#dash-task-pane'), '::before');
       const walkerStyle = getComputedStyle(document.querySelector('#task-walker'));
       const trackStyle = getComputedStyle(document.querySelector('.task-route-track'), '::before');
       const fillStyle = getComputedStyle(document.querySelector('#task-route-fill'));
-      const startStyle = getComputedStyle(document.querySelector('.task-route-start'));
-      const finishStyle = getComputedStyle(document.querySelector('.task-route-finish'));
       const scoreStyle = getComputedStyle(document.querySelector('.task-progress-score'));
       return {
+        innerWidth: window.innerWidth,
+        sidebarWidth: appStyle.getPropertyValue('--sidebar-width').trim(),
         paneHeight: pane.height,
+        paneLeft: pane.left,
+        paneWidth: pane.width,
         paneBackground: paneStyle.backgroundColor,
         paneBorderColor: paneStyle.borderTopColor,
         paneRadius: paneStyle.borderTopLeftRadius,
-        dividerColor: dividerStyle.backgroundColor,
+        baselineWidth: baseline.width,
+        currentWidth: current.width,
         trackLeft: track.left,
         trackWidth: track.width,
         fillRatio: fill.width / track.width,
-        fillRight: fill.right,
-        walkerRight: walker.right,
-        walkerCenter: walker.left + (walker.width / 2),
-        walkerSize: walker.width,
-        walkerHeight: walker.height,
-        walkerBackground: walkerStyle.backgroundColor,
+        walkerDisplay: walkerStyle.display,
         trackHeight: track.height,
         trackColor: trackStyle.backgroundColor,
         trackLineHeight: trackStyle.height,
         fillColor: fillStyle.backgroundColor,
         fillOpacity: fillStyle.opacity,
-        startColor: startStyle.backgroundColor,
-        finishColor: finishStyle.backgroundColor,
-        finishBorderColor: finishStyle.borderTopColor,
         scoreBackground: scoreStyle.backgroundColor,
-        startSize: start.width,
-        finishSize: finish.width,
         scoreWidth: score.width,
         scoreHeight: score.height,
+        tableLeft: table.left,
+        tableWidth: table.width,
+        tableHeight: table.height,
+        tableHeadHeight: tableHead.height,
+        firstRowHeight: firstRow.height,
       };
     });
-    assert.strictEqual(positions.paneHeight, 140, 'running card should preserve the approved 140px Figma height');
+    if (process.env.DEBUG_LAYOUT) process.stdout.write(`${JSON.stringify(positions, null, 2)}\n`);
+    assert.strictEqual(positions.paneHeight, 149, 'running card should preserve the approved 149px Figma height');
+    assert.strictEqual(positions.innerWidth, 1920, 'visual regression should run at the Figma desktop width');
+    assert.strictEqual(positions.sidebarWidth, '304px', 'desktop layout should preserve the 304px Figma sidebar');
+    assert.strictEqual(positions.paneLeft, 352, 'running card should align to the 48px main-content gutter');
+    assert.strictEqual(positions.paneWidth, 1520, 'running card should span the approved 1520px content width');
     assert.strictEqual(positions.paneBackground, 'rgb(255, 255, 255)', 'card background should match Figma white');
-    assert.strictEqual(positions.paneBorderColor, 'rgb(221, 221, 221)', 'card border should match Figma #ddd');
+    assert.strictEqual(positions.paneBorderColor, 'rgb(230, 230, 230)', 'card border should match the Figma divider color');
     assert.strictEqual(positions.paneRadius, '14px', 'card radius should match Figma 14px');
-    assert.strictEqual(positions.dividerColor, 'rgb(238, 238, 238)', 'divider should match Figma #eee');
-    assert.strictEqual(positions.walkerSize, 18, 'walker should match the latest Figma 18px width');
-    assert.strictEqual(positions.walkerHeight, 19, 'walker should match the latest Figma 19px height');
-    assert.strictEqual(positions.walkerBackground, 'rgba(0, 0, 0, 0)', 'walker should no longer sit inside a black circle');
-    assert.strictEqual(positions.trackHeight, 19, 'route container should hold the latest 17px Figma track and 19px walker');
-    assert.strictEqual(positions.trackLineHeight, '17px', 'visible track should match the latest Figma 17px height');
-    assert.strictEqual(positions.trackColor, 'rgb(231, 231, 231)', 'track should match Figma #e7e7e7');
+    assert.strictEqual(positions.baselineWidth, 390, 'baseline segment should preserve its Figma width');
+    assert.strictEqual(positions.currentWidth, 355, 'current-platform segment should preserve its Figma width');
+    assert.strictEqual(positions.walkerDisplay, 'none', 'the final Figma projection should use a simple monochrome bar without the old walker');
+    assert.strictEqual(positions.trackHeight, 11, 'route should use the approved 11px bar');
+    assert.strictEqual(positions.trackLineHeight, '11px', 'visible track should use the approved 11px height');
+    assert.strictEqual(positions.trackColor, 'rgb(236, 236, 236)', 'track should match Figma #ececec');
     assert.strictEqual(positions.fillColor, 'rgb(17, 17, 17)', 'fill should match Figma #111');
-    assert.strictEqual(positions.fillOpacity, '0.8', 'progress fill should use the latest Figma 80% opacity');
-    assert.strictEqual(positions.startColor, 'rgba(17, 17, 17, 0.64)', 'start point should preserve Figma layered opacity');
-    assert.strictEqual(positions.finishColor, 'rgb(255, 255, 255)', 'finish point should preserve Figma white fill');
-    assert.strictEqual(positions.finishBorderColor, 'rgb(221, 221, 221)', 'finish point should preserve Figma #ddd border');
-    assert.strictEqual(positions.scoreBackground, 'rgba(17, 17, 17, 0.95)', 'score badge should preserve Figma group opacity');
+    assert.strictEqual(positions.fillOpacity, '1', 'progress fill should use solid black');
+    assert.strictEqual(positions.scoreBackground, 'rgba(0, 0, 0, 0)', 'progress score should be plain text in the final Figma layout');
     assert(Math.abs(positions.fillRatio - 0.705) < 0.001, 'fill geometry should retain the unrounded 70.5% position behind the 71% label');
-    assert(Math.abs(positions.walkerRight - positions.fillRight) < 1, 'walker right edge should stay attached to the fill endpoint');
-    assert.strictEqual(positions.startSize, 17, 'start marker should match the latest Figma 17px size');
-    assert.strictEqual(positions.finishSize, 17, 'finish marker should match the latest Figma 17px size');
-    assert.strictEqual(positions.scoreWidth, 121, 'progress badge should preserve the approved width');
-    assert.strictEqual(positions.scoreHeight, 31, 'progress badge should preserve the approved height');
-    assert(positions.walkerCenter > positions.trackLeft + (positions.trackWidth * 0.65), 'walker should move beyond two thirds of the route');
+    assert.strictEqual(positions.scoreWidth, 137, 'progress score should preserve the approved segment width');
+    assert.strictEqual(positions.scoreHeight, 149, 'progress score container should share the full Figma task-pane height');
+    assert.strictEqual(positions.tableLeft, 353, 'platform table should align to the Figma x=353 coordinate');
+    assert.strictEqual(positions.tableWidth, 1520, 'platform table should preserve the approved width');
+    assert.strictEqual(positions.tableHeight, 559, 'platform table should preserve the approved height');
+    assert.strictEqual(positions.tableHeadHeight, 64, 'platform table header should preserve the approved height');
+    assert.strictEqual(positions.firstRowHeight, 108, 'platform rows should preserve the approved height');
+
+    await page.setViewportSize({ width: 1472, height: 914 });
+    await page.waitForFunction(() => document.querySelector('#app')?.dataset.viewportScale === '0.766667');
+    const compact = await page.evaluate(() => {
+      const app = document.querySelector('#app');
+      const sidebar = document.querySelector('.sidebar');
+      const main = document.querySelector('.main-content');
+      const table = document.querySelector('.platform-table-shell');
+      const appRect = app.getBoundingClientRect();
+      const sidebarRect = sidebar.getBoundingClientRect();
+      const tableRect = table.getBoundingClientRect();
+      return {
+        scale: Number(app.dataset.viewportScale),
+        appLayoutWidth: app.offsetWidth,
+        appVisualWidth: appRect.width,
+        appVisualHeight: appRect.height,
+        appVisualY: appRect.y,
+        sidebarVisualWidth: sidebarRect.width,
+        mainClientWidth: main.clientWidth,
+        mainScrollWidth: main.scrollWidth,
+        tableRight: tableRect.right,
+        viewportWidth: window.innerWidth,
+        viewportHeight: window.innerHeight,
+        bodyScrollWidth: document.body.scrollWidth,
+        rootScrollWidth: document.documentElement.scrollWidth,
+      };
+    });
+    assert(Math.abs(compact.scale - (1472 / 1920)) < 0.000001, 'native window should use one uniform 1920-to-viewport scale');
+    assert.strictEqual(compact.appLayoutWidth, 1920, 'scaled native window should preserve the internal 1920px design canvas');
+    assert(Math.abs(compact.appVisualWidth - 1472) < 0.01, 'scaled design canvas should exactly fit the native viewport width');
+    assert(Math.abs(compact.appVisualHeight - (1080 * 1472 / 1920)) < 0.01, 'scaled design canvas should preserve the 16:9 Figma aspect ratio');
+    assert(Math.abs(compact.appVisualY - 43) < 0.01, 'non-16:9 native windows should center the fixed canvas with vertical letterboxing');
+    assert(Math.abs(compact.sidebarVisualWidth - (304 * 1472 / 1920)) < 0.01, 'sidebar should scale proportionally with the full canvas');
+    assert.strictEqual(compact.mainClientWidth, 1616, 'main content should retain the 1920px Figma coordinate system');
+    assert.strictEqual(compact.mainScrollWidth, compact.mainClientWidth, 'main content should not keep a horizontal overflow strip');
+    assert(compact.tableRight <= compact.viewportWidth + 0.01, 'platform table should remain inside the visible native window');
+    assert.strictEqual(compact.bodyScrollWidth, compact.viewportWidth, 'body should not expose horizontal overflow after scaling');
+    assert.strictEqual(compact.rootScrollWidth, compact.viewportWidth, 'root should not expose horizontal overflow after scaling');
+
+    if (process.argv.includes('--screenshot')) {
+      const compactOutput = path.join(ROOT, 'tmp', 'figma-local-build', 'repro-1472-after.png');
+      fs.mkdirSync(path.dirname(compactOutput), { recursive: true });
+      await page.screenshot({ path: compactOutput });
+      process.stdout.write(`${compactOutput}\n`);
+    }
+
+    const idleFillWidth = await page.evaluate(() => {
+      const pane = document.querySelector('#dash-task-pane');
+      pane.classList.remove('is-running');
+      pane.classList.add('is-idle');
+      resetCollectionJourneyVisualProgress();
+      return document.querySelector('#task-route-fill').getBoundingClientRect().width;
+    });
+    assert.strictEqual(idleFillWidth, 0, 'idle dashboard must not show a full black progress bar at 0%');
 
     await page.emulateMedia({ reducedMotion: 'reduce' });
     const reducedMotionStyles = await page.locator('#task-walker .task-walker-icon').evaluate((element) => {

@@ -9,6 +9,10 @@ const MONITOR_THEME_CSS = fs.readFileSync(
   path.resolve(__dirname, "..", "frontend", "assets", "progress-apple-theme.css"),
   "utf8"
 );
+const MONITOR_FIGMA_CSS = fs.readFileSync(
+  path.resolve(__dirname, "..", "frontend", "assets", "progress-figma-dashboard.css"),
+  "utf8"
+);
 
 function buildDefaultProgress(overrides = {}) {
   return {
@@ -136,6 +140,11 @@ async function withServer(scenario, callback) {
       res.end(MONITOR_THEME_CSS);
       return;
     }
+    if (url.pathname === "/assets/progress-figma-dashboard.css") {
+      res.writeHead(200, { "Content-Type": "text/css; charset=utf-8" });
+      res.end(MONITOR_FIGMA_CSS);
+      return;
+    }
     if (url.pathname === "/config") {
       res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
       res.end(JSON.stringify({ ok: true, config: scenario.config, summary: scenario.configSummary }));
@@ -223,6 +232,10 @@ async function withPage(callback) {
     launchOptions.executablePath = chromePath;
   } else if (fs.existsSync(edgePath)) {
     launchOptions.executablePath = edgePath;
+  } else if (process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH && fs.existsSync(process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH)) {
+    launchOptions.executablePath = process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH;
+  } else if (process.platform === "darwin" && fs.existsSync("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome")) {
+    launchOptions.executablePath = "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome";
   }
   const browser = await chromium.launch(launchOptions);
   const page = await browser.newPage();
@@ -331,30 +344,32 @@ async function testMonitorHtmlUsesExternalThemeStylesheet() {
   );
 }
 
-async function testMonitorHtmlUsesSectionShellStructure() {
+async function testMonitorHtmlUsesFigmaViewAndWizardStructure() {
   assert(
-    /<section class="[^"]*shell-section[^"]*shell-section-light[^"]*" id="wizardView">/.test(MONITOR_HTML),
-    "wizard view should use a light shell-section wrapper"
+    MONITOR_HTML.includes('<div id="view-dashboard" class="view-container active">'),
+    "dashboard should use the active Figma view-container structure"
   );
   assert(
-    /<section class="[^"]*shell-section[^"]*shell-section-light[^"]*" id="dashboardView">/.test(MONITOR_HTML),
-    "dashboard view should use a light shell-section wrapper"
+    MONITOR_HTML.includes('<div id="view-history" class="view-container">'),
+    "history should use the Figma view-container structure"
   );
   assert(
-    /<section class="[^"]*shell-section[^"]*shell-section-light[^"]*" id="resultsView">/.test(MONITOR_HTML),
-    "results view should use a light shell-section wrapper"
+    /<div id="wizard-overlay" class="wizard-overlay hidden">\s*<div class="wizard-card">/.test(MONITOR_HTML),
+    "onboarding should use the current centered wizard overlay and card structure"
   );
   assert(
-    MONITOR_HTML.includes('class="panel-title panel-title-lg"'),
-    "static section headings should use semantic panel-title classes instead of inline font sizing"
+    MONITOR_HTML.includes('class="page-title"'),
+    "Figma page headings should use the shared page-title class"
   );
   assert(
-    !MONITOR_HTML.includes('<h2 id="heroTitle" style="margin:0">'),
-    "hero title should no longer rely on inline style for its layout"
+    MONITOR_THEME_CSS.includes(".view-container") &&
+      MONITOR_THEME_CSS.includes(".wizard-overlay") &&
+      MONITOR_THEME_CSS.includes(".wizard-card"),
+    "base theme should define the current view and onboarding overlay structures"
   );
   assert(
-    MONITOR_THEME_CSS.includes(".shell-section-light") && MONITOR_THEME_CSS.includes(".panel-title"),
-    "theme stylesheet should define shell-section and panel-title structures"
+    MONITOR_FIGMA_CSS.includes("#viewport-stage") && MONITOR_FIGMA_CSS.includes("#view-history"),
+    "Figma stylesheet should own the scaled application stage and history view projection"
   );
 }
 
@@ -1189,14 +1204,66 @@ async function testAuthRequiredStateDoesNotPretendToBeCompleted() {
 }
 
 async function testQueuedPlatformIsNotPresentedAsActivelyCollecting() {
-  assert(
-    MONITOR_HTML.includes("pData.ui_status === 'queued'"),
-    "dashboard should handle queued platform state explicitly"
+  const match = MONITOR_HTML.match(
+    /function platformCollectionState\(progress\)\s*\{[\s\S]*?\n  \}/,
   );
-  assert(
-    MONITOR_HTML.includes('排队等待...</span>'),
-    "queued platform should display a queue badge instead of the active collection badge"
+  assert(match, "dashboard should define the platform collection-state mapper");
+  const platformCollectionState = new Function(
+    `${match[0]}; return platformCollectionState;`,
+  )();
+  assert.deepStrictEqual(
+    platformCollectionState({ ui_status: "queued" }),
+    { label: "排队等待", className: "is-queued" },
+    "queued platform should use the dedicated queue state instead of the active collection state",
   );
+}
+
+async function testAuthorizingPlatformNeverUsesCollectionCopyOrAnimation() {
+  const scenario = buildScenario({
+    config: { enabled_platforms: ["douyin"] },
+    configSummary: { authorized_platform_count: 0 },
+    douyin: {
+      status: "running",
+      phase: "login",
+      message: "准备启动授权流程",
+      auth_status: "needs_auth",
+      auth_reason: "manual_reauth_required",
+      needs_auth: true,
+      ui_status: "authorizing",
+    },
+    progress: { running: true },
+    progressSummary: {
+      active_platform: "douyin",
+      current_stage: "authorizing",
+      authorized_platform_count: 0,
+      auth_running_platforms: ["douyin"],
+    },
+  });
+
+  await withServer(scenario, async ({ baseUrl }) => {
+    await withPage(async (page) => {
+      await page.route("**/license", (route) => route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ ok: true, activated: true, valid: true, customer_name: "本地测试" }),
+      }));
+      await page.goto(`${baseUrl}/monitor`, { waitUntil: "networkidle" });
+      await page.waitForFunction(() => document.querySelector("#task-step-title")?.textContent === "正在进行账号授权");
+      const taskPane = page.locator("#dash-task-pane");
+      const douyinRow = page.locator('.platform-table-row[data-platform="douyin"]');
+
+      assert.strictEqual(await page.locator("#task-step-title").innerText(), "正在进行账号授权");
+      assert((await page.locator("#task-step-desc").innerText()).includes("登录窗口"));
+      assert.strictEqual(await taskPane.evaluate((node) => node.classList.contains("is-authorizing")), true);
+      assert.strictEqual(await taskPane.evaluate((node) => node.classList.contains("is-running")), false);
+      assert.strictEqual(await douyinRow.locator(".collection-status").innerText(), "授权进行中");
+      assert.strictEqual(await douyinRow.locator(".collection-status").getAttribute("class"), "collection-status is-authorizing");
+      assert.strictEqual(await douyinRow.locator(".platform-health span").innerText(), "授权中");
+      assert.strictEqual(await douyinRow.locator(".platform-auth-action button").innerText(), "授权中");
+      assert.strictEqual(await douyinRow.locator(".platform-auth-action button").isDisabled(), true);
+      assert(!(await taskPane.innerText()).includes("正在采集平台数据"));
+    });
+  });
 }
 
 async function testFeishuOnlyRunsFallbackToPlatformsWhenPlatformResultsAreEmpty() {
@@ -1255,7 +1322,7 @@ async function testFeishuOnlyRunsFallbackToPlatformsWhenPlatformResultsAreEmpty(
 
 async function main() {
   await testMonitorHtmlUsesExternalThemeStylesheet();
-  await testMonitorHtmlUsesSectionShellStructure();
+  await testMonitorHtmlUsesFigmaViewAndWizardStructure();
   await testRerunModalUsesDateRangeAndSendsBothDates();
   await testWizardRequiresAtLeastOneAuthorizedPlatform();
   await testPlatformWritesPreserveLatestSnapshotWhenResponsesReverse();
@@ -1272,6 +1339,7 @@ async function main() {
   await testNoDataCopyUsesWuShuJuInsteadOfZeroCountCopy();
   await testAuthRequiredStateDoesNotPretendToBeCompleted();
   await testQueuedPlatformIsNotPresentedAsActivelyCollecting();
+  await testAuthorizingPlatformNeverUsesCollectionCopyOrAnimation();
   await testFeishuOnlyRunsFallbackToPlatformsWhenPlatformResultsAreEmpty();
 }
 
@@ -1284,8 +1352,12 @@ const selectedRun = process.argv.includes("--reliability-only")
   ? runReliabilityGuards
   : process.argv.includes("--platform-write-only")
   ? testPlatformWritesPreserveLatestSnapshotWhenResponsesReverse
+  : process.argv.includes("--structure-only")
+  ? testMonitorHtmlUsesFigmaViewAndWizardStructure
   : process.argv.includes("--queued-only")
   ? testQueuedPlatformIsNotPresentedAsActivelyCollecting
+  : process.argv.includes("--authorizing-only")
+  ? testAuthorizingPlatformNeverUsesCollectionCopyOrAnimation
   : (process.argv.includes("--onboarding-auth-only")
     ? testWizardRequiresEverySelectedPlatformToBeAuthorized
     : main);

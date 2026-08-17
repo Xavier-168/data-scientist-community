@@ -109,9 +109,7 @@ fn should_open_in_system_browser(url: &tauri::Url) -> bool {
         || host.ends_with(".feishu.cn")
         || host == "larkoffice.com"
         || host.ends_with(".larkoffice.com");
-    let local_excel =
-        matches!(host, "127.0.0.1" | "localhost" | "::1") && url.path() == "/download-excel";
-    (url.scheme() == "https" && feishu_host) || (url.scheme() == "http" && local_excel)
+    url.scheme() == "https" && feishu_host
 }
 
 #[cfg(test)]
@@ -119,12 +117,10 @@ mod external_url_tests {
     use super::should_open_in_system_browser;
 
     #[test]
-    fn allows_feishu_and_local_excel_only() {
+    fn allows_feishu_only() {
         for url in [
             "https://accounts.feishu.cn/oauth/v1/device/verify?user_code=TEST",
             "https://tenant.larkoffice.com/base/test",
-            "http://127.0.0.1:8811/download-excel?file=all",
-            "http://localhost:8811/download-excel?file=bilibili",
         ] {
             assert!(
                 should_open_in_system_browser(&tauri::Url::parse(url).unwrap()),
@@ -135,6 +131,8 @@ mod external_url_tests {
             "http://accounts.feishu.cn/oauth/v1/device/verify",
             "https://feishu.cn.evil.example/path",
             "http://127.0.0.1:8811/config",
+            "http://127.0.0.1:8811/download-excel?file=all",
+            "http://localhost:8811/download-excel?file=bilibili",
             "https://example.com/download-excel",
         ] {
             assert!(

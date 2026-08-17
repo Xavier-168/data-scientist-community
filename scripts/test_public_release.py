@@ -147,16 +147,20 @@ class PublicReleaseContractTests(unittest.TestCase):
         self.assertEqual(records[0]["licenseDeclared"], "MIT OR Apache-2.0")
         self.assertIn("metadata", run.call_args.args[0])
 
-    def test_fonts_use_system_fallback_and_font_binaries_are_absent(self):
+    def test_only_verified_figma_font_is_distributed(self):
         css = (ROOT / "frontend/assets/progress-apple-theme.css").read_text(encoding="utf-8")
         self.assertNotIn("@font-face", css)
         self.assertNotRegex(css, re.compile(r"fonts/.*\.(?:otf|ttf|woff2?)", re.I))
+        figma_css = (ROOT / "frontend/assets/progress-figma-dashboard.css").read_text(encoding="utf-8")
+        self.assertIn('@font-face', figma_css)
+        self.assertIn('fonts/NotoSerifSC-Variable.ttf', figma_css)
         font_files = [
             path.relative_to(ROOT).as_posix()
             for path in (ROOT / "frontend").rglob("*")
             if path.suffix.lower() in {".otf", ".ttf", ".woff", ".woff2"}
         ]
-        self.assertEqual(font_files, [])
+        self.assertEqual(font_files, ["frontend/assets/fonts/NotoSerifSC-Variable.ttf"])
+        self.assertTrue((ROOT / "frontend/assets/fonts/NotoSerifSC-OFL.txt").is_file())
 
     def test_original_community_icons_cover_source_and_macos_bundle(self):
         for name in ("community-icon.png", "community-icon.icns"):

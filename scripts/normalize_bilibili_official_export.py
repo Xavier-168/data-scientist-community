@@ -36,6 +36,13 @@ OFFICIAL_TO_INTERNAL = {
     "播放完成率": "完播率",
 }
 
+REQUIRED_METRIC_ALIASES = {
+    "封标点击率": {"封标点击率", "封面点击率"},
+    "封面点击率": {"封标点击率", "封面点击率"},
+    "3秒跳出率": {"3秒跳出率", "3s跳出率"},
+    "3s跳出率": {"3秒跳出率", "3s跳出率"},
+}
+
 # B 站官方稿件对比导出没有 bvid/avid；保持 title + publish_at 生成稳定本地 ID。
 OUTPUT_COLUMNS = [
     "平台",
@@ -152,6 +159,43 @@ def normalize_cover_click_rate(value):
     return f"{round(percent, 2):g}%"
 
 
+def validate_required_metric_columns(df: pd.DataFrame, required_metrics, source_name=""):
+    normalized_column_pairs = [
+        (index, OFFICIAL_TO_INTERNAL.get(normalize_header(column), normalize_header(column)))
+        for index, column in enumerate(df.columns)
+    ]
+    missing = []
+    empty = []
+    for metric in required_metrics or []:
+        aliases = REQUIRED_METRIC_ALIASES.get(metric, {metric})
+        normalized_aliases = {
+            OFFICIAL_TO_INTERNAL.get(normalize_header(alias), normalize_header(alias))
+            for alias in aliases
+        }
+        matching_indexes = [
+            index
+            for index, normalized_column in normalized_column_pairs
+            if normalized_column in normalized_aliases
+        ]
+        if not matching_indexes:
+            missing.append(metric)
+            continue
+        if not any(
+            clean_value(value)
+            for index in matching_indexes
+            for value in df.iloc[:, index].tolist()
+        ):
+            empty.append(metric)
+    if missing or empty:
+        label = source_name or "官方导出文件"
+        problems = []
+        if missing:
+            problems.append(f"缺少 {'、'.join(missing)}")
+        if empty:
+            problems.append(f"{'、'.join(empty)} 整批无有效值")
+        raise ValueError(f"B 站官方导出字段异常：{label} {'；'.join(problems)}")
+
+
 def normalize_rows(df: pd.DataFrame, min_date: str, max_date: str):
     rename_map = {col: OFFICIAL_TO_INTERNAL.get(normalize_header(col), normalize_header(col)) for col in df.columns}
     normalized_df = df.rename(columns=rename_map)
@@ -221,6 +265,7 @@ def main():
     parser.add_argument("--excel-output", required=True)
     parser.add_argument("--min-date", default="")
     parser.add_argument("--max-date", default="")
+    parser.add_argument("--required-metric", action="append", default=[])
     args = parser.parse_args()
 
     all_rows = []
@@ -228,7 +273,9 @@ def main():
         input_path = Path(raw_input)
         if not input_path.exists():
             raise FileNotFoundError(f"B 站官方导出文件不存在：{input_path}")
-        all_rows.extend(normalize_rows(read_official_export(input_path), args.min_date, args.max_date))
+        official_df = read_official_export(input_path)
+        validate_required_metric_columns(official_df, args.required_metric, input_path.name)
+        all_rows.extend(normalize_rows(official_df, args.min_date, args.max_date))
 
     rows = dedupe_rows(all_rows)
     rows_output = Path(args.rows_output)
