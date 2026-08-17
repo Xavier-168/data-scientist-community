@@ -11,6 +11,7 @@ const ROOT = fileURLToPath(new URL('..', import.meta.url));
 const HOST = '127.0.0.1';
 const START_TIMEOUT_MS = 15_000;
 const STOP_TIMEOUT_MS = 2_000;
+const BROWSER_FORCE_STOP_TIMEOUT_MS = 10_000;
 const OUTPUT_LIMIT_BYTES = 16 * 1024;
 const MAX_PORT_RETRIES = 3;
 
@@ -41,7 +42,7 @@ function delay(milliseconds) {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-async function boundedOperation(operation, timeoutCode, failureCode) {
+async function boundedOperation(operation, timeoutCode, failureCode, timeoutMs = STOP_TIMEOUT_MS) {
   let timeout;
   try {
     return await Promise.race([
@@ -51,7 +52,7 @@ async function boundedOperation(operation, timeoutCode, failureCode) {
           throw new SmokeError(failureCode);
         }),
       new Promise((_, reject) => {
-        timeout = setTimeout(() => reject(new SmokeError(timeoutCode)), STOP_TIMEOUT_MS);
+        timeout = setTimeout(() => reject(new SmokeError(timeoutCode)), timeoutMs);
       }),
     ]);
   } finally {
@@ -350,7 +351,6 @@ async function cleanupBrowserServer(
       );
     } catch (error) {
       closeError = error;
-      errors.push(error);
     }
 
     if (closeError || processHandleOpen()) {
@@ -359,6 +359,7 @@ async function cleanupBrowserServer(
           () => browserServer.kill(),
           'browser_kill_timeout',
           'browser_kill_failed',
+          BROWSER_FORCE_STOP_TIMEOUT_MS,
         );
       } catch (error) {
         errors.push(error);
@@ -370,6 +371,7 @@ async function cleanupBrowserServer(
         () => browserProcessClosed,
         'browser_process_close_timeout',
         'browser_process_close_failed',
+        BROWSER_FORCE_STOP_TIMEOUT_MS,
       );
     } catch (error) {
       errors.push(error);
@@ -380,7 +382,7 @@ async function cleanupBrowserServer(
     try {
       const remainingPids = await waitForProcessTreeExit(
         processTreePids,
-        STOP_TIMEOUT_MS,
+        BROWSER_FORCE_STOP_TIMEOUT_MS,
       );
       if (remainingPids.length > 0) {
         errors.push(new SmokeError('browser_process_tree_leaked'));

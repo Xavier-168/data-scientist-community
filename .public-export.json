@@ -164,7 +164,7 @@
     "scripts/test_start_monitor_security.py": "8d97457351642f061d17d29cc41635361fee2032fb8fc129d9675c97c103cd25",
     "scripts/test_subprocess_supervisor.py": "acd5809885128c6b61a7e04f6b9a05b6fc550a7cb36ed0e1e905b0a30027bb13",
     "scripts/test_tauri_scaffold.py": "c28f15894896c2887017c795c0368e891c997e272d022edf91754e5b5a4bc402",
-    "scripts/test_tauri_startup_ui.mjs": "2f01bbe4e41c076687b633f1fffe91c45dff4e61d9ca918ea35bfa7b94170b6a",
+    "scripts/test_tauri_startup_ui.mjs": "2c10b9b91a0e5dc7de2d60d46ed6a531a0d44939b1685996a0c45f5850447181",
     "scripts/test_update_manager_security.py": "730ab46641b0830291ec5569e3795b0690f166dae4a60f321c69eaf03b9bf2e9",
     "scripts/test_xiaohongshu_auth_stability.mjs": "73d1993835e58c1e1265b55e94acb6bf0e3eb4fba20ce447f0a2698a3f6ea447",
     "scripts/title_cleanup_utils.mjs": "bd0cc271cc0c6dacf2ada2e8795082045c15684cede4a974d9902e09d8c74d7d",
@@ -176,7 +176,7 @@
   },
   "source_snapshot": {
     "base_commit": "be26103a6d91492a6730833fbd61261dd249a34d",
-    "content_sha256": "bb81e6e62a21455675393bf7e0a5ac7ff2e7d10f3019de7cfa22a74aa22ab4e2",
+    "content_sha256": "f6a59e767881142bd1445a98f89d545a947b5e1d1b742cf2022ac3b3817d64cf",
     "inputs_dirty_against_base_commit": true,
     "kind": "working_tree"
   },
