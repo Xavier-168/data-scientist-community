@@ -143,7 +143,7 @@
     "scripts/test_excel_export_flow.js": "14e5a5f2308add6f44e94978ca140c94c124354376cfa569c66330cb241fc3cd",
     "scripts/test_feedback_privacy.py": "196b63ed628544928322274de6726f1ac911828730168969b879ae501bbc1ca4",
     "scripts/test_feishu_sync_cli.py": "1b6e847be0dc37e618831c8be9e78b78c23e62b5c932f8eb2286eaa27e26c4f1",
-    "scripts/test_figma_fullscreen_layout.js": "07d17a1a91cdcddab5b7e6b1958ade1fdb1509177255355ab5026d450ad75aa3",
+    "scripts/test_figma_fullscreen_layout.js": "effaeb0e54e10f5b7a0c4e3321cb620ed3bc3674620ddcf30f963c39601ca8f3",
     "scripts/test_frontend_request_recovery.js": "3d25441f92c65d57092c87864c68713069d87e99509098c5daf705c40403a30c",
     "scripts/test_frontend_security.js": "07e23a25dc251fc85d9d0f00d70e41967996dae83ff6ba38873893a70671e51f",
     "scripts/test_kuaishou_export_download.mjs": "cc3b6ac1b9932e944e17ef498537df7735f4704b1a922e56bcd94f4b3671ac8c",
@@ -176,7 +176,7 @@
   },
   "source_snapshot": {
     "base_commit": "be26103a6d91492a6730833fbd61261dd249a34d",
-    "content_sha256": "34d4d5260b49f6f7419a21d534008142d59b1b3b48f5ea989f4d0423bf1b8fe9",
+    "content_sha256": "bb81e6e62a21455675393bf7e0a5ac7ff2e7d10f3019de7cfa22a74aa22ab4e2",
     "inputs_dirty_against_base_commit": true,
     "kind": "working_tree"
   },

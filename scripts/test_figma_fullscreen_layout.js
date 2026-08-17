@@ -15,6 +15,35 @@ const IDLE_SCREENSHOT_PATH = process.env.FIGMA_IDLE_SCREENSHOT
   || path.join(ROOT, 'tmp', 'figma-local-build', 'figma-idle-progress-and-actions.png');
 const HISTORY_SCREENSHOT_PATH = process.env.FIGMA_HISTORY_SCREENSHOT
   || path.join(ROOT, 'tmp', 'figma-local-build', 'figma-history-log-scale.png');
+const KEEP_SCREENSHOTS = process.argv.includes('--keep-screenshots')
+  || process.argv.includes('--screenshot')
+  || Boolean(process.env.FIGMA_LAYOUT_SCREENSHOT)
+  || Boolean(process.env.FIGMA_TALL_SCREENSHOT)
+  || Boolean(process.env.FIGMA_IDLE_SCREENSHOT)
+  || Boolean(process.env.FIGMA_HISTORY_SCREENSHOT);
+const DEFAULT_SCREENSHOT_DIR = path.join(ROOT, 'tmp', 'figma-local-build');
+const DEFAULT_SCREENSHOTS = [
+  SCREENSHOT_PATH,
+  TALL_SCREENSHOT_PATH,
+  IDLE_SCREENSHOT_PATH,
+  HISTORY_SCREENSHOT_PATH,
+];
+
+function cleanupTransientScreenshots() {
+  if (KEEP_SCREENSHOTS) return;
+  for (const screenshotPath of DEFAULT_SCREENSHOTS) {
+    if (!path.resolve(screenshotPath).startsWith(`${path.resolve(DEFAULT_SCREENSHOT_DIR)}${path.sep}`)) continue;
+    try { fs.unlinkSync(screenshotPath); } catch (error) {
+      if (error?.code !== 'ENOENT') throw error;
+    }
+  }
+  try { fs.rmdirSync(DEFAULT_SCREENSHOT_DIR); } catch (error) {
+    if (!['ENOENT', 'ENOTEMPTY'].includes(error?.code)) throw error;
+  }
+  try { fs.rmdirSync(path.dirname(DEFAULT_SCREENSHOT_DIR)); } catch (error) {
+    if (!['ENOENT', 'ENOTEMPTY'].includes(error?.code)) throw error;
+  }
+}
 
 function validateSourceContract() {
   const html = fs.readFileSync(HTML_PATH, 'utf8');
@@ -991,12 +1020,17 @@ async function main() {
     }
 
     process.stdout.write('Figma geometry, colors, typography, shadows and constraints verified at 1920x1080, 1720x980, 1472x914, 1280x800, 2560x1440 and tall-window 1496x1000.\n');
-    process.stdout.write(`Screenshot: ${SCREENSHOT_PATH}\n`);
-    process.stdout.write(`Tall-window screenshot: ${TALL_SCREENSHOT_PATH}\n`);
-    process.stdout.write(`Idle progress screenshot: ${IDLE_SCREENSHOT_PATH}\n`);
-    process.stdout.write(`History log screenshot: ${HISTORY_SCREENSHOT_PATH}\n`);
+    if (KEEP_SCREENSHOTS) {
+      process.stdout.write(`Screenshot: ${SCREENSHOT_PATH}\n`);
+      process.stdout.write(`Tall-window screenshot: ${TALL_SCREENSHOT_PATH}\n`);
+      process.stdout.write(`Idle progress screenshot: ${IDLE_SCREENSHOT_PATH}\n`);
+      process.stdout.write(`History log screenshot: ${HISTORY_SCREENSHOT_PATH}\n`);
+    } else {
+      process.stdout.write('Transient Figma screenshots cleaned after verification.\n');
+    }
   } finally {
     await browser.close();
+    cleanupTransientScreenshots();
   }
 }
 
