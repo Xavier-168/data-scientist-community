@@ -249,7 +249,7 @@ def find_channel_executable(channel: str) -> Path | None:
             ],
         }
         candidates = mac_paths.get(channel, [])
-    else:
+    elif os.name == "nt":
         # Windows
         local_app_data = os.environ.get("LOCALAPPDATA", "")
         if channel == "chrome":
@@ -268,6 +268,30 @@ def find_channel_executable(channel: str) -> Path | None:
                 candidates.append(Path(local_app_data) / "Microsoft/Edge/Application/msedge.exe")
         else:
             candidates = []
+    else:
+        # Linux / WSL：优先 PATH 中的浏览器，其次常见安装路径
+        candidates = []
+        linux_names = {
+            "chrome": ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser"),
+            "msedge": ("microsoft-edge", "microsoft-edge-stable"),
+        }
+        for name in linux_names.get(channel, ()):
+            found = shutil.which(name)
+            if found:
+                return Path(found)
+        linux_paths = {
+            "chrome": [
+                Path("/opt/google/chrome/google-chrome"),
+                Path("/usr/bin/google-chrome-stable"),
+                Path("/usr/bin/chromium"),
+                Path("/snap/bin/google-chrome"),
+            ],
+            "msedge": [
+                Path("/usr/bin/microsoft-edge"),
+                Path("/opt/microsoft/msedge/microsoft-edge"),
+            ],
+        }
+        candidates = linux_paths.get(channel, [])
     for candidate in candidates:
         if candidate.exists():
             return candidate
@@ -379,8 +403,13 @@ def ensure_playwright_browsers(root_dir: Path, channel: str) -> None:
     if browser_executable_is_usable(managed_chromium):
         return
     if managed_chromium:
+        if sys.platform == "darwin":
+            raise RuntimeError(
+                "Bundled Chrome runtime exists but macOS blocked it. Restart macOS or reinstall Google Chrome."
+            )
         raise RuntimeError(
-            "Bundled Chrome runtime exists but macOS blocked it. Restart macOS or reinstall Google Chrome."
+            "Playwright Chromium 已安装但无法启动，可能缺少系统依赖。\n"
+            "请运行: sudo npx playwright install-deps chromium"
         )
     bundled_browser_root = root_dir / "runtime" / "playwright-browsers"
     if bundled_browser_root.exists():
@@ -501,7 +530,12 @@ def safe_open_browser(url: str, root_dir: Path, channel: str) -> bool:
     if browser_path:
         try:
             print(f"[browser] launching directly: {browser_path} {url}")
-            subprocess.Popen([str(browser_path), url], cwd=str(root_dir))
+            subprocess.Popen(
+                [str(browser_path), url],
+                cwd=str(root_dir),
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
             _activate_macos_app(app_bundle)
             return True
         except Exception as exc:
@@ -515,10 +549,18 @@ def safe_open_browser(url: str, root_dir: Path, channel: str) -> bool:
 
 
 def print_browser_unavailable_message() -> None:
-    msg = (
-        "Chrome/Chromium 无法启动，macOS 安全策略正在拦截浏览器进程。\n"
-        "请重启 Mac 后再打开数据科学家；如果仍失败，请重新安装 Google Chrome。"
-    )
+    if sys.platform == "darwin":
+        msg = (
+            "Chrome/Chromium 无法启动，macOS 安全策略正在拦截浏览器进程。\n"
+            "请重启 Mac 后再打开数据科学家；如果仍失败，请重新安装 Google Chrome。"
+        )
+    elif os.name == "nt":
+        msg = "Chrome/Chromium 无法启动，请确认已安装 Google Chrome 或 Microsoft Edge。"
+    else:
+        msg = (
+            "Chrome/Chromium 无法启动，可能缺少系统依赖。\n"
+            "请运行: sudo npx playwright install-deps chromium"
+        )
     print(f"[error] {msg}", file=sys.stderr)
     print(f"[user-message] {msg}")
 
@@ -598,29 +640,49 @@ def runner_build_matches(current: dict[str, str], running: dict[str, str]) -> bo
 
 
 def listener_pids_for_port(port: int) -> list[int]:
-    if sys.platform != "darwin":
+    if sys.platform == "darwin":
+        lsof = find_cmd("lsof")
+        if not lsof:
+            return []
+        try:
+            result = subprocess.run(
+                [lsof, "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                check=False,
+            )
+        except Exception:
+            return []
+        pids: list[int] = []
+        for line in result.stdout.splitlines():
+            try:
+                pid = int(line.strip())
+            except ValueError:
+                continue
+            if pid > 0 and pid != os.getpid():
+                pids.append(pid)
+        return sorted(set(pids))
+
+    if os.name == "nt":
         return []
-    lsof = find_cmd("lsof")
-    if not lsof:
+
+    # Linux / WSL: 使用 fuser 列出监听端口的进程
+    fuser = find_cmd("fuser")
+    if not fuser:
         return []
     try:
         result = subprocess.run(
-            [lsof, "-nP", f"-iTCP:{port}", "-sTCP:LISTEN", "-t"],
+            [fuser, "-n", "tcp", str(port)],
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             text=True,
             check=False,
+            timeout=5,
         )
     except Exception:
         return []
-    pids: list[int] = []
-    for line in result.stdout.splitlines():
-        try:
-            pid = int(line.strip())
-        except ValueError:
-            continue
-        if pid > 0 and pid != os.getpid():
-            pids.append(pid)
+    pids = [int(pid) for pid in re.findall(r"\d+", result.stdout or "") if int(pid) != os.getpid()]
     return sorted(set(pids))
 
 
@@ -736,10 +798,28 @@ def _is_loopback_host(host: str) -> bool:
     return value.lower() == "localhost" or value == "127.0.0.1"
 
 
+def _is_wsl() -> bool:
+    """WSL2 环境检测（Linux 内核带 microsoft 标识）。"""
+    if sys.platform != "linux":
+        return False
+    try:
+        with open("/proc/version", encoding="utf-8", errors="replace") as handle:
+            return "microsoft" in handle.read().lower()
+    except OSError:
+        return False
+
+
+def _is_allowed_bind_host(host: str) -> bool:
+    """默认只允许回环地址；WSL 下额外放行 0.0.0.0 以便 Windows 侧访问。"""
+    if _is_loopback_host(host):
+        return True
+    return _is_wsl() and str(host or "").strip() == "0.0.0.0"
+
+
 def main() -> int:
     args = parse_args()
 
-    if not _is_loopback_host(args.host):
+    if not _is_allowed_bind_host(args.host):
         msg = "为保护本地会话和采集数据，服务只允许监听 127.0.0.1 或 localhost。"
         print(f"[error] {msg}", file=sys.stderr)
         print(f"[user-message] {msg}")
