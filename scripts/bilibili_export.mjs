@@ -192,12 +192,31 @@ export function classifyBilibiliTargetDiscovery({
   invalidWorks = 0,
   outsideDateWorks = 0,
 } = {}) {
-  if (acceptedWorks > 0) return 'ok';
   if (!responseShapeOk) return 'response_shape_changed';
+  // 任意一条稿件无法解析，都意味着接口目标集可能不完整；不得拿部分集合继续导出。
+  if (invalidWorks > 0) return 'unparseable_items';
+  if (acceptedWorks > 0) return 'ok';
   if (rawWorks <= 0) return 'api_empty';
-  if (invalidWorks >= rawWorks) return 'unparseable_items';
   if (outsideDateWorks >= Math.max(1, rawWorks - invalidWorks)) return 'outside_date_range';
   return 'no_eligible_items';
+}
+
+export function finalizeBilibiliTargetDiscovery(works, diagnostics = {}) {
+  const candidates = Array.isArray(works) ? works : [];
+  const acceptedWorks = candidates.length;
+  const reason = classifyBilibiliTargetDiscovery({
+    ...diagnostics,
+    acceptedWorks,
+  });
+  return {
+    // 分页中途结构变化或任意稿件解析失败时，丢弃整个接口集合并回退官方 UI 日期扫描。
+    works: reason === 'ok' ? candidates : [],
+    diagnostics: {
+      ...diagnostics,
+      acceptedWorks,
+      reason,
+    },
+  };
 }
 
 export function buildBilibiliOfficialFallbackTargets(cards, {
@@ -308,6 +327,50 @@ function chunkArray(items, size) {
     chunks.push(items.slice(index, index + size));
   }
   return chunks;
+}
+
+export function buildBilibiliOfficialExportBatches(items, requestedBatchSize = MAX_WORKS_PER_OFFICIAL_EXPORT) {
+  const parsedBatchSize = Number.parseInt(requestedBatchSize, 10) || MAX_WORKS_PER_OFFICIAL_EXPORT;
+  const batchSize = Math.min(MAX_WORKS_PER_OFFICIAL_EXPORT, Math.max(2, parsedBatchSize));
+  const batches = chunkArray(Array.isArray(items) ? items : [], batchSize);
+  // “近期稿件对比”官方页面要求每批至少 2 条。余数为 1 时，从前一批挪 1 条，
+  // 例如 21 条由 10+10+1 调整为无重叠的 10+9+2。
+  if (batches.length > 1 && batches[batches.length - 1].length === 1) {
+    const previousBatch = batches[batches.length - 2];
+    const finalBatch = batches[batches.length - 1];
+    finalBatch.unshift(previousBatch.pop());
+  }
+  return batches;
+}
+
+export function buildBilibiliOfficialExportPlan(items, requestedBatchSize = MAX_WORKS_PER_OFFICIAL_EXPORT) {
+  const batches = buildBilibiliOfficialExportBatches(items, requestedBatchSize);
+  return {
+    authority: 'official_csv',
+    totalWorks: batches.reduce((total, batch) => total + batch.length, 0),
+    expectedFiles: batches.length,
+    validForOfficialComparison: batches.length > 0 && batches.every((batch) => batch.length >= 2),
+    batches,
+  };
+}
+
+// processedWorks/successWorks 只表示已经拿到官方文件的目标数。
+// 接口发现、页面定位和勾选都属于准备阶段，只能更新 currentIndex/message，不能提前记为成功。
+export function buildBilibiliOfficialProgressSnapshot({
+  totalWorks = 0,
+  completedWorks = 0,
+  currentIndex = completedWorks,
+} = {}) {
+  const total = Math.max(0, Number.parseInt(totalWorks, 10) || 0);
+  const completed = Math.min(total, Math.max(0, Number.parseInt(completedWorks, 10) || 0));
+  const index = Math.min(total, Math.max(completed, Number.parseInt(currentIndex, 10) || 0));
+  return {
+    totalWorks: total,
+    processedWorks: completed,
+    successWorks: completed,
+    queuedWorks: Math.max(0, total - completed),
+    currentIndex: index,
+  };
 }
 
 function newProgressState() {
@@ -962,14 +1025,17 @@ async function listTargetWorksByApi(page) {
       worksByKey.set(workCardKey(card), card);
     }
 
+    const discoveredTotal = CONFIG.videoLimit > 0
+      ? Math.min(CONFIG.videoLimit, worksByKey.size)
+      : worksByKey.size;
     await updateProgress({
       phase: 'selecting',
       message: `B 站稿件接口已锁定 ${worksByKey.size} 条目标稿件`,
-      totalWorks: CONFIG.videoLimit > 0 ? Math.min(CONFIG.videoLimit, worksByKey.size) : worksByKey.size,
-      processedWorks: worksByKey.size,
-      successWorks: worksByKey.size,
-      queuedWorks: 0,
-      currentIndex: worksByKey.size,
+      ...buildBilibiliOfficialProgressSnapshot({
+        totalWorks: discoveredTotal,
+        completedWorks: 0,
+        currentIndex: discoveredTotal,
+      }),
     });
 
     if (CONFIG.videoLimit > 0 && worksByKey.size >= CONFIG.videoLimit) break;
@@ -978,17 +1044,7 @@ async function listTargetWorksByApi(page) {
 
   const works = Array.from(worksByKey.values()).sort((left, right) => (right.publishTs || 0) - (left.publishTs || 0));
   const limitedWorks = CONFIG.videoLimit > 0 ? works.slice(0, CONFIG.videoLimit) : works;
-  return {
-    works: limitedWorks,
-    diagnostics: {
-      ...diagnostics,
-      acceptedWorks: limitedWorks.length,
-      reason: classifyBilibiliTargetDiscovery({
-        ...diagnostics,
-        acceptedWorks: limitedWorks.length,
-      }),
-    },
-  };
+  return finalizeBilibiliTargetDiscovery(limitedWorks, diagnostics);
 }
 
 async function readSelectedWorkCount(frame) {
@@ -1286,29 +1342,47 @@ async function scrollWorkListToTop(frame) {
   await sleep(700);
 }
 
-async function confirmWorkSelection(frame) {
-  const clicked = await frame.evaluate(() => {
-    const visible = (el) => {
-      const rect = el.getBoundingClientRect();
-      const style = window.getComputedStyle(el);
-      return rect.width > 20
-        && rect.height > 20
-        && rect.bottom > 0
-        && rect.top < window.innerHeight
-        && style.visibility !== 'hidden'
-        && style.display !== 'none'
-        && style.opacity !== '0';
-    };
-    const candidates = Array.from(document.querySelectorAll('.arcp-queue-confirm, button, [role="button"], div'))
-      .filter((el) => (el.textContent || '').trim() === '确认')
-      .filter(visible);
-    const active = candidates.find((el) => String(el.className || '').includes('active')) || candidates[candidates.length - 1];
-    if (!active) return false;
-    active.click();
-    return true;
-  });
-  if (!clicked) throw new Error('未定位到可见的 B 站稿件选择确认按钮');
-  await sleep(2000);
+async function confirmWorkSelection(frame, selectedCount) {
+  const actualSelectedCount = await readSelectedWorkCount(frame);
+  if (actualSelectedCount !== selectedCount) {
+    throw new Error(`B 站稿件选择数量异常：期望 ${selectedCount} 条，实际 ${actualSelectedCount} 条`);
+  }
+
+  const dialogs = frame.locator('[role="dialog"], .bili-modal, .bcc-dialog, .modal').filter({ hasText: '稿件列表' });
+  let workDialog = null;
+  for (let index = 0; index < await dialogs.count(); index += 1) {
+    const candidate = dialogs.nth(index);
+    if (await candidate.isVisible().catch(() => false)) {
+      workDialog = candidate;
+      break;
+    }
+  }
+  if (!workDialog) {
+    throw new Error('B 站稿件选择确认失败：未找到可见的稿件列表弹窗');
+  }
+
+  const activeConfirms = workDialog.locator('.arcp-queue-confirm.active');
+  let activeConfirm = null;
+  for (let index = 0; index < await activeConfirms.count(); index += 1) {
+    const candidate = activeConfirms.nth(index);
+    const text = String(await candidate.textContent().catch(() => '')).replace(/\s+/g, '').trim();
+    const ariaDisabled = await candidate.getAttribute('aria-disabled').catch(() => null);
+    if (text === '确认' && ariaDisabled !== 'true' && await candidate.isVisible().catch(() => false)) {
+      activeConfirm = candidate;
+      break;
+    }
+  }
+  if (!activeConfirm) {
+    throw new Error(`B 站稿件选择确认按钮未激活：官方近期稿件对比至少需要 2 条，当前已选 ${selectedCount} 条`);
+  }
+  await activeConfirm.click();
+  const dialogClosed = await workDialog.waitFor({ state: 'hidden', timeout: 15_000 })
+    .then(() => true)
+    .catch(() => false);
+  if (!dialogClosed) {
+    throw new Error('B 站稿件选择确认后弹窗未关闭，官方对比条件可能未满足');
+  }
+  await sleep(500);
 }
 
 // 严格以 B 站接口返回的目标稿件集为准，再在官方导出弹窗里逐个定位，避免 UI 懒加载导致早停漏稿。
@@ -1347,11 +1421,11 @@ async function collectWorksByTargetSet(frame, targetWorks) {
     await updateProgress({
       phase: 'selecting',
       message: `B 站稿件弹窗已定位 ${worksByTargetId.size}/${targetWorks.length} 条目标稿件`,
-      totalWorks: targetWorks.length,
-      processedWorks: worksByTargetId.size,
-      successWorks: worksByTargetId.size,
-      queuedWorks: Math.max(0, targetWorks.length - worksByTargetId.size),
-      currentIndex: worksByTargetId.size,
+      ...buildBilibiliOfficialProgressSnapshot({
+        totalWorks: targetWorks.length,
+        completedWorks: 0,
+        currentIndex: worksByTargetId.size,
+      }),
     });
 
     if (shouldStopBilibiliTargetScroll({
@@ -1440,11 +1514,11 @@ async function collectWorksByOfficialDateRange(frame, diagnostics = {}) {
     await updateProgress({
       phase: 'selecting',
       message: `B 站创作中心稿件列表已扫描 ${cardsByKey.size} 条，日期范围内 ${eligibleWorks.length} 条`,
-      totalWorks: eligibleWorks.length,
-      processedWorks: eligibleWorks.length,
-      successWorks: eligibleWorks.length,
-      queuedWorks: 0,
-      currentIndex: eligibleWorks.length,
+      ...buildBilibiliOfficialProgressSnapshot({
+        totalWorks: eligibleWorks.length,
+        completedWorks: 0,
+        currentIndex: eligibleWorks.length,
+      }),
     });
 
     const scrollState = await scrollWorkList(frame);
@@ -1484,11 +1558,11 @@ async function confirmTargetsWithOfficialScroll(page, targetWorks) {
   await updateProgress({
     phase: 'selecting',
     message: `B 站已完成接口目标与官方弹窗滚动双重确认：${confirmed.length} 条`,
-    totalWorks: confirmed.length,
-    processedWorks: confirmed.length,
-    successWorks: confirmed.length,
-    queuedWorks: 0,
-    currentIndex: confirmed.length,
+    ...buildBilibiliOfficialProgressSnapshot({
+      totalWorks: confirmed.length,
+      completedWorks: 0,
+      currentIndex: confirmed.length,
+    }),
   });
   return { confirmed, confirmFrame };
 }
@@ -1614,16 +1688,17 @@ async function clearSelectedWorks(frame) {
 }
 
 // 每批只选择最多 10 条，确认后立刻导出；多批文件最后交给 normalizer 合并去重。
-async function selectWorkBatch(frame, batch, batchIndex, totalBatches, totalWorks) {
+async function selectWorkBatch(frame, batch, batchIndex, totalBatches, totalWorks, completedWorks) {
   const seenTargetIds = new Set();
   let bottomPassConsumed = false;
   await updateProgress({
     phase: 'selecting',
     message: `选择 B 站稿件第 ${batchIndex + 1}/${totalBatches} 批（每批最多 ${MAX_WORKS_PER_OFFICIAL_EXPORT} 个）`,
-    totalWorks,
-    processedWorks: batchIndex * MAX_WORKS_PER_OFFICIAL_EXPORT,
-    successWorks: batchIndex * MAX_WORKS_PER_OFFICIAL_EXPORT,
-    queuedWorks: Math.max(0, totalWorks - batchIndex * MAX_WORKS_PER_OFFICIAL_EXPORT),
+    ...buildBilibiliOfficialProgressSnapshot({
+      totalWorks,
+      completedWorks,
+      currentIndex: completedWorks,
+    }),
   });
 
   await clearSelectedWorks(frame);
@@ -1656,10 +1731,11 @@ async function selectWorkBatch(frame, batch, batchIndex, totalBatches, totalWork
     await updateProgress({
       phase: 'selecting',
       message: `B 站第 ${batchIndex + 1}/${totalBatches} 批：已选 ${selectedCount}/${batch.length}，已定位 ${seenTargetIds.size}/${batch.length}`,
-      currentIndex: batchIndex * MAX_WORKS_PER_OFFICIAL_EXPORT + Math.min(selectedCount, batch.length),
-      processedWorks: Math.min(totalWorks, batchIndex * MAX_WORKS_PER_OFFICIAL_EXPORT + seenTargetIds.size),
-      successWorks: batchIndex * MAX_WORKS_PER_OFFICIAL_EXPORT,
-      queuedWorks: Math.max(0, totalWorks - batchIndex * MAX_WORKS_PER_OFFICIAL_EXPORT - Math.min(selectedCount, batch.length)),
+      ...buildBilibiliOfficialProgressSnapshot({
+        totalWorks,
+        completedWorks,
+        currentIndex: completedWorks + Math.min(selectedCount, batch.length),
+      }),
     });
 
     if (seenTargetIds.size >= batch.length && selectedCount === batch.length) {
@@ -1689,7 +1765,7 @@ async function selectWorkBatch(frame, batch, batchIndex, totalBatches, totalWork
     throw new Error(`B 站第 ${batchIndex + 1} 批选择未完成：定位 ${seenTargetIds.size}/${batch.length}，已选 ${finalSelectedCount}/${batch.length}`);
   }
 
-  await confirmWorkSelection(frame);
+  await confirmWorkSelection(frame, finalSelectedCount);
   return batch.length;
 }
 
@@ -1811,7 +1887,26 @@ async function clickVisibleExportMenuItem(frame) {
       }
     };
 
-    const candidates = Array.from(document.querySelectorAll('button, [role="button"], a, li, div, span'))
+    // 二次确认项只允许从当前可见的浮层/菜单中选取。不在整个页面搜索，
+    // 否则文件生成较慢时会再次点到主导出按钮，引发重复下载竞态。
+    const popupSelectors = [
+      '[role="menu"]',
+      '[role="listbox"]',
+      '[data-popper-placement]',
+      '.bcc-popover',
+      '.bcc-dropdown',
+      '.bcc-menu',
+      '.popover',
+      '.dropdown-menu',
+      '.el-popper',
+    ].join(', ');
+    const popups = Array.from(document.querySelectorAll(popupSelectors))
+      .filter(isVisible)
+      .filter((el) => {
+        const rect = el.getBoundingClientRect();
+        return rect.width <= 640 && rect.height <= 720;
+      });
+    const candidates = popups.flatMap((popup) => Array.from(popup.querySelectorAll('button, [role="menuitem"], [role="option"], [role="button"], a, li')))
       .map((el) => {
         const text = normalizeText(el.innerText);
         const rect = el.getBoundingClientRect();
@@ -1819,6 +1914,7 @@ async function clickVisibleExportMenuItem(frame) {
       })
       .filter((item) => /导出|下载/.test(item.text))
       .filter((item) => item.text.length <= 20)
+      .filter((item, index, items) => items.findIndex((other) => other.el === item.el) === index)
       .filter((item) => isVisible(item.el));
     candidates.sort((a, b) => {
       const aExact = /^(导出|导出数据|下载|下载数据)$/.test(a.text) ? 1 : 0;
@@ -1834,30 +1930,66 @@ async function clickVisibleExportMenuItem(frame) {
   });
 }
 
+// 直下文件有时会晚于二次菜单探测。菜单是可选分支，未出现时仍必须等待完整下载窗口，
+// 不能在短探测超时后把仍在生成的官方文件误判为失败。
+export async function waitForBilibiliOfficialDownload({
+  startDownloadWait,
+  clickExport,
+  clickOptionalMenu,
+  menuProbeDelayMs = 1_500,
+  menuProbeIntervalMs = 1_000,
+  menuProbeAttempts = 12,
+}) {
+  // 必须在点击之前同步建立 Playwright download listener，避免极快下载丢事件。
+  let pendingDownload;
+  try {
+    pendingDownload = startDownloadWait();
+  } catch (error) {
+    pendingDownload = Promise.reject(error);
+  }
+  const downloadResultPromise = Promise.resolve(pendingDownload)
+    .then(
+      (download) => ({ download, error: null }),
+      (error) => ({ download: null, error }),
+    );
+
+  await clickExport();
+  let finalResult = await Promise.race([
+    downloadResultPromise,
+    sleep(Math.max(0, menuProbeDelayMs)).then(() => null),
+  ]);
+
+  let menuClicked = false;
+  const attempts = Math.max(1, Number.parseInt(menuProbeAttempts, 10) || 1);
+  for (let attempt = 0; !finalResult && attempt < attempts; attempt += 1) {
+    menuClicked = Boolean(await clickOptionalMenu().catch(() => false)) || menuClicked;
+    finalResult = await Promise.race([
+      downloadResultPromise,
+      sleep(Math.max(0, menuProbeIntervalMs)).then(() => null),
+    ]);
+    if (menuClicked && !finalResult) {
+      // 菜单已点击后不再重复点击，继续等待同一个完整下载 listener。
+      finalResult = await downloadResultPromise;
+    }
+  }
+  finalResult = finalResult || await downloadResultPromise;
+  if (!finalResult?.download) {
+    const cause = finalResult?.error?.message ? `：${finalResult.error.message}` : '';
+    const branch = menuClicked ? '已点击二次确认菜单' : '页面未出现二次确认菜单';
+    throw new Error(`B 站官方导出未开始下载（${branch}）${cause}`);
+  }
+  return finalResult.download;
+}
+
 async function downloadOfficialExport(page, frame) {
   await updateProgress({ phase: 'exporting', message: '点击 B 站官方导出按钮' });
   await ensureDir(CONFIG.officialDownloadDir);
 
-  let download = null;
-  const firstDownload = page.waitForEvent('download', { timeout: 15_000 }).catch((error) => ({ error }));
-  await clickExportButton(frame);
-  const firstResult = await firstDownload;
-  if (firstResult && !firstResult.error) {
-    download = firstResult;
-  } else {
-    const secondDownload = page.waitForEvent('download', { timeout: 60_000 }).catch((error) => ({ error }));
-    const menuClicked = await clickVisibleExportMenuItem(frame);
-    if (!menuClicked) {
-      const cause = firstResult?.error?.message ? `：${firstResult.error.message}` : '';
-      throw new Error(`点击导出后未触发下载，也未找到可见的二次确认菜单${cause}`);
-    }
-    const secondResult = await secondDownload;
-    if (!secondResult || secondResult.error) {
-      const cause = secondResult?.error?.message ? `：${secondResult.error.message}` : '';
-      throw new Error(`B 站官方导出未开始下载${cause}`);
-    }
-    download = secondResult;
-  }
+  const download = await waitForBilibiliOfficialDownload({
+    startDownloadWait: () => page.waitForEvent('download', { timeout: 60_000 }),
+    clickExport: () => clickExportButton(frame),
+    clickOptionalMenu: () => clickVisibleExportMenuItem(frame),
+  });
 
   const suggested = download.suggestedFilename() || `bilibili-official-${Date.now()}.csv`;
   const safeName = suggested.replace(/[^\w\u4e00-\u9fa5().-]+/g, '_');
@@ -1880,6 +2012,7 @@ async function normalizeOfficialExport(officialPaths) {
   ];
   if (CONFIG.minPublishDate) args.push('--min-date', CONFIG.minPublishDate);
   if (CONFIG.maxPublishDate) args.push('--max-date', CONFIG.maxPublishDate);
+  for (const metric of CONFIG.requiredMetrics) args.push('--required-metric', metric);
 
   const { stdout } = await execFileAsync(CONFIG.pythonBin, args, { timeout: 120_000 });
   const payload = JSON.parse(stdout.trim().split('\n').pop() || '{}');
@@ -1908,159 +2041,6 @@ async function assertNormalizedMetricCoverage() {
     throw new Error(`B 站官方导出缺少有效指标值：${missing.join('、')}`);
   }
   return rows;
-}
-
-// ── XHR 直采模式（提速 ~25 倍，替代官方 CSV 导出链路）──────────────────────
-// 探测验证：member.bilibili.com/x/web/data/archive_diagnose/compare 接口
-// 在创作中心页面加载时返回稿件的 stat（完播率/跳出率/封标点击率等深度指标）。
-// 我们在浏览器内监听这个响应直接取 JSON，省掉「勾自选指标 + 点导出 + 等下载 +
-// 解析 CSV」整条慢链路。从平台角度看和正常浏览无区别，封号风险极低。
-//
-// 字段口径已实测对照（见提交说明）：
-//   - play/like/comment/fav/share/coin 等计数字段：与 CSV 完全一致（整数）
-//   - full_play_ratio/crash_rate/play_viewer_rate 等百分比字段：
-//     XHR 返回 ×100 整数（5783 = 57.83%），映射时 ÷100 加 %
-//   - interact_rate（互动率）：XHR 直接给，CSV 没有（bonus）
-//   - 平均播放时长/进度：接口不返回，留空（unified_avg_watch_seconds 对
-//     bilibili 本来就硬编码返回 0，不影响下游）
-
-const ARCHIVE_DIAGNOSE_API = '/x/web/data/archive_diagnose/compare';
-
-function biliStatToRow(item) {
-  const stat = item?.stat ?? {};
-  // 百分比字段：XHR 返回 ×100 整数（5783），转成带 % 的文本（57.83%），
-  // 与 normalize_bilibili_official_export.py 输出口径保持一致。
-  const ratioText = (raw) => {
-    if (typeof raw !== 'number' || !Number.isFinite(raw) || raw === 0) return '';
-    return `${(raw / 100).toFixed(2)}%`;
-  };
-  // 稿件时长（秒）→ "N分M秒" 或 "M秒"，与 B 站展示一致
-  const durationText = (seconds) => {
-    if (typeof seconds !== 'number' || !Number.isFinite(seconds) || seconds <= 0) return '';
-    const m = Math.floor(seconds / 60);
-    const s = Math.floor(seconds % 60);
-    return m > 0 ? `${m}分${s}秒` : `${s}秒`;
-  };
-  const pubTs = Number.parseInt(item?.pubtime ?? item?.pubdate, 10) || 0;
-  const publishDate = pubTs > 0 ? formatDate(pubTs * 1000) : '';
-  const publishTime = pubTs > 0 ? formatDate(pubTs * 1000) : '';
-  const bvid = item?.bvid || '';
-  // CSV 导出没有 bvid，用 title+publish 生成稳定 ID；XHR 有 bvid 更好，用它。
-  const workId = bvid || normalizePublishKey(`${item?.title ?? ''}-${publishDate}`);
-
-  return {
-    平台: 'bilibili',
-    作品ID: bvid,
-    标题: normalizeBilibiliTitle(item?.title ?? ''),
-    发布日期: publishDate,
-    发布时间: publishTime,
-    播放量: String(stat.play ?? ''),
-    游客播放占比: ratioText(stat.play_passer_rate),
-    粉丝观看率: ratioText(stat.play_fan_rate),
-    粉丝播放占比: ratioText(stat.play_fan_rate),
-    封标点击率: ratioText(stat.play_viewer_rate),
-    封面点击率: ratioText(stat.play_viewer_rate),
-    '3秒跳出率': ratioText(stat.crash_rate),
-    '3s跳出率': ratioText(stat.crash_rate),
-    涨粉量: String(stat.total_new_attention_cnt ?? ''),
-    点赞量: String(stat.like ?? ''),
-    评论量: String(stat.comment ?? ''),
-    弹幕量: String(stat.danmaku ?? ''),
-    收藏量: String(stat.fav ?? ''),
-    投币量: String(stat.coin ?? ''),
-    转发量: String(stat.share ?? ''),
-    分享量: String(stat.share ?? ''),
-    平均播放进度: '',
-    平均播放占比: '',
-    完播率: ratioText(stat.full_play_ratio),
-    内容类型: '视频',
-  };
-}
-
-function meetsDateRangeByPubdate(item, { minDate, maxDate }) {
-  // archive_diagnose 接口稿件发布日期字段是 pubtime（实测确认），不是 pubdate
-  const pubTs = Number.parseInt(item?.pubtime ?? item?.pubdate, 10) || 0;
-  if (pubTs <= 0) return minDate || maxDate ? false : true;
-  return meetsDateRangeFromTs(pubTs * 1000);
-}
-
-async function collectWorksByXhr(page, apiTargets) {
-  // 主动 fetch archive_diagnose/compare?size=50 拿全稿件，再按时间范围本地过滤。
-  // 探测验证：size=10 是页面默认值，size 参数有效（size=50 返回 50 条，字段完整），
-  // 接口不支持时间筛选（time/st/et 参数无效），所以用 size 拿全量再本地过滤。
-  // 这正是「先确定时间范围，再选范围内所有作品」的思路。
-  const targetKeys = new Set(apiTargets.map((work) => work.key).filter(Boolean));
-  const targetBvids = new Set(apiTargets.map((work) => work.bvid).filter(Boolean));
-  const FETCH_SIZE = Math.min(50, Math.max(10, CONFIG.videoLimit || 50));
-
-  await updateProgress({ phase: 'xhr_collecting', message: 'XHR 直采 B 站稿件数据（提速模式）' });
-
-  // 在浏览器上下文里主动调接口（带登录 cookie，和正常浏览无区别）
-  const diagnoseApiBase = 'https://member.bilibili.com/x/web/data/archive_diagnose/compare';
-  const rawItems = await page.evaluate(async (url) => {
-    const resp = await fetch(`${url}?size=50`, { credentials: 'include' });
-    const parsed = await resp.json();
-    return parsed?.data?.list || parsed?.data?.archives || [];
-  }, diagnoseApiBase).catch(() => []);
-
-  const collected = new Map();
-  for (const item of rawItems) {
-    const bvid = item?.bvid;
-    if (!bvid || collected.has(bvid)) continue;
-    collected.set(bvid, item);
-  }
-
-  // 按发布日期过滤 + 映射成业务行
-  const allItems = Array.from(collected.values());
-  const items = allItems
-    .filter((item) => meetsDateRangeByPubdate(item, { minDate: CONFIG.minPublishDate, maxDate: CONFIG.maxPublishDate }));
-  const rows = items.map(biliStatToRow);
-  return { rows, collectedBvids: new Set(items.map((item) => item?.bvid).filter(Boolean)) };
-}
-
-async function writeXhrRows(rows) {
-  // 直接产出 tempRowsPath（JSON）+ outputPath（xlsx），格式与 normalizer 输出一致，
-  // 下游 merge_channels / platform_source_rows / build_excel_export 无需改动。
-  const dedupMap = new Map();
-  for (const row of rows) {
-    const key = row['作品ID'] || row['标题'] || '';
-    if (!key || dedupMap.has(key)) continue;
-    dedupMap.set(key, row);
-  }
-  const dedupedRows = Array.from(dedupMap.values());
-  await fs.mkdir(path.dirname(CONFIG.tempRowsPath), { recursive: true });
-  await fs.writeFile(CONFIG.tempRowsPath, JSON.stringify(dedupedRows, null, 2), 'utf-8');
-
-  const args = [
-    path.resolve('scripts', 'write_rows_excel.py'),
-    '--input', CONFIG.tempRowsPath,
-    '--output', CONFIG.outputPath,
-    '--columns',
-    '平台,作品ID,标题,发布日期,发布时间,播放量,封标点击率,封面点击率,3秒跳出率,3s跳出率,涨粉量,点赞量,评论量,弹幕量,收藏量,投币量,转发量,分享量,完播率,内容类型',
-    '--dedupe-key', '作品ID',
-  ];
-  await execFileAsync(CONFIG.pythonBin, args, { timeout: 120_000 });
-  return dedupedRows.length;
-}
-
-async function tryXhrCollection(page, apiTargets) {
-  // XHR 直采：尝试用 archive_diagnose/compare 接口直采。
-  // 接口硬上限 50 条（size>50 仍返回 50 条，无分页参数有效）。
-  // 成功返回 { ok: true, rowsCount, collectedBvids }；失败返回 { ok: false, error }。
-  try {
-    const { rows, collectedBvids } = await collectWorksByXhr(page, apiTargets);
-    if (rows.length === 0) {
-      return { ok: false, error: 'XHR 直采未捕获到稿件数据（接口可能未加载或返回空）' };
-    }
-    const rowsCount = await writeXhrRows(rows);
-    if (rowsCount === 0) {
-      return { ok: false, error: 'XHR 直采数据写入后为空' };
-    }
-    return { ok: true, rowsCount, collectedBvids };
-  } catch (error) {
-    const message = error instanceof Error ? error.message : String(error);
-    return { ok: false, error: message };
-  }
 }
 
 async function main() {
@@ -2107,101 +2087,109 @@ async function main() {
     const targetDiscovery = await listTargetWorksByApi(page);
     let confirmedTargets;
     let confirmFrame;
-    let forceOfficialCsvFallback = false;
 
     if (targetDiscovery.works.length > 0) {
-      // Fast XHR collection must still be checked against the real official scroll list. Otherwise a
-      // complete API response could hide a broken/changed UI scroll path until the slower CSV fallback.
+      // WBI 目标必须再经过创作中心官方弹窗的真实滚动确认，接口结果本身不作为最终数据源。
       ({ confirmed: confirmedTargets, confirmFrame } = await confirmTargetsWithOfficialScroll(page, targetDiscovery.works));
     } else {
       confirmFrame = await findDataFrame(page, { requireRecent: true });
       await openWorkSelection(confirmFrame);
       confirmedTargets = await collectWorksByOfficialDateRange(confirmFrame, targetDiscovery.diagnostics);
-      forceOfficialCsvFallback = true;
       await updateProgress({
         phase: 'selecting',
         message: `B 站已从创作中心稿件列表锁定 ${confirmedTargets.length} 条，使用官方 CSV 保证完整性`,
-        totalWorks: confirmedTargets.length,
-        processedWorks: confirmedTargets.length,
-        successWorks: confirmedTargets.length,
-        queuedWorks: 0,
-        currentIndex: confirmedTargets.length,
+        ...buildBilibiliOfficialProgressSnapshot({
+          totalWorks: confirmedTargets.length,
+          completedWorks: 0,
+          currentIndex: confirmedTargets.length,
+        }),
       });
     }
 
-    // ── 提速模式：优先 XHR 直采（~25 倍提速）────────────────────────────
-    // 探测验证：archive_diagnose/compare 接口能直接返回完播率/跳出率/封标点击率
-    // 等深度指标的 JSON。成功则跳过整条慢链路（勾自选指标+点导出+等下载+解析CSV）。
-    // 失败则自动 fallback 到原 CSV 导出链路，保证稳定性。
-    let rowsCount = 0;
-    const xhrResult = forceOfficialCsvFallback
-      ? { ok: false, error: '空间接口目标为空，使用创作中心官方 CSV 链路' }
-      : await tryXhrCollection(page, confirmedTargets);
-    const xhrCoveredAll = (() => {
-      // 检查 XHR 是否覆盖了 WBI 锁定的全部目标稿件
-      // archive_diagnose 接口硬上限 50 条，超出部分 XHR 拿不到，需降级 CSV 补全
-      if (!xhrResult.ok || !xhrResult.collectedBvids) return false;
-      const targetBvids = new Set(confirmedTargets.map((w) => w.bvid).filter(Boolean));
-      if (targetBvids.size === 0) return true; // WBI 没锁定目标，XHR 采到什么算什么
-      const missed = Array.from(targetBvids).filter((bvid) => !xhrResult.collectedBvids.has(bvid));
-      if (missed.length > 0) {
-        console.warn(`[bili-warning] XHR 直采覆盖 ${xhrResult.collectedBvids.size}/${targetBvids.size} 条，遗漏 ${missed.length} 条（超出接口 50 条上限），降级 CSV 补全`);
-        return false;
+    // 最终数据必须来自创作中心官方导出。WBI 只负责锁定目标稿件，官方弹窗滚动负责确认；
+    // 任何接口响应都不得跳过每批最多 10 条的官方文件、normalizer 和完整性校验。
+    await updateProgress({
+      phase: 'official_exporting',
+      message: `B 站开始按官方每批最多 ${MAX_WORKS_PER_OFFICIAL_EXPORT} 条导出 ${confirmedTargets.length} 条稿件`,
+      ...buildBilibiliOfficialProgressSnapshot({
+        totalWorks: confirmedTargets.length,
+        completedWorks: 0,
+        currentIndex: 0,
+      }),
+    });
+    await closeWorkSelection(confirmFrame);
+
+    let dataFrame = await findDataFrame(page, { requireRecent: true });
+    await selectDataMode(dataFrame);
+    await ensureComparisonMetrics(dataFrame);
+    await openWorkSelection(dataFrame);
+    const works = await collectWorksByTargetSet(dataFrame, confirmedTargets);
+    const officialPlan = buildBilibiliOfficialExportPlan(works);
+    const { batches } = officialPlan;
+    if (batches.length <= 0) {
+      throw new Error('B 站官方导出没有可执行的稿件批次');
+    }
+    if (!officialPlan.validForOfficialComparison) {
+      throw new Error(`B 站官方近期稿件对比至少需要 2 条，当前日期范围内只有 ${works.length} 条`);
+    }
+
+    const officialPaths = [];
+    let selectedCount = 0;
+    let completedWorks = 0;
+    for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
+      if (batchIndex > 0) {
+        await page.close().catch(() => {});
+        page = await prepareAuthPage(context, await context.newPage());
+        page = await ensureDashboard(context, page);
+        dataFrame = await findDataFrame(page, { requireRecent: true });
+        await selectDataMode(dataFrame);
+        await ensureComparisonMetrics(dataFrame);
+        await openWorkSelection(dataFrame);
       }
-      return true;
-    })();
-
-    if (xhrResult.ok && xhrCoveredAll) {
-      rowsCount = xhrResult.rowsCount;
-    } else {
-      // ── Fallback：官方 CSV 导出链路（XHR 失败 或 超出50条覆盖不全时降级）──
-      const reason = !xhrResult.ok
-        ? `XHR 直采失败，降级到官方 CSV 导出：${xhrResult.error}`
-        : `XHR 直采未覆盖全部目标稿件（超出接口 50 条上限），降级 CSV 补全`;
-      console.warn(`[bili-warning] ${reason}`);
-      await updateProgress({ phase: 'csv_fallback', message: reason });
-      await closeWorkSelection(confirmFrame);
-
-      let dataFrame = await findDataFrame(page, { requireRecent: true });
-      await selectDataMode(dataFrame);
-      await ensureComparisonMetrics(dataFrame);
-      await openWorkSelection(dataFrame);
-      const works = await collectWorksByTargetSet(dataFrame, confirmedTargets);
-      const batches = chunkArray(works, MAX_WORKS_PER_OFFICIAL_EXPORT);
-      const officialPaths = [];
-      let selectedCount = 0;
-
-      for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
-        if (batchIndex > 0) {
-          await page.close().catch(() => {});
-          page = await prepareAuthPage(context, await context.newPage());
-          page = await ensureDashboard(context, page);
-          dataFrame = await findDataFrame(page, { requireRecent: true });
-          await selectDataMode(dataFrame);
-          await ensureComparisonMetrics(dataFrame);
-          await openWorkSelection(dataFrame);
-        }
-        const batch = batches[batchIndex];
-        try {
-          selectedCount += await selectWorkBatch(dataFrame, batch, batchIndex, batches.length, works.length);
-          const officialPath = await downloadOfficialExport(page, dataFrame);
-          officialPaths.push(officialPath);
-        } catch (error) {
-          throw buildOfficialBatchError(batchIndex, error);
-        }
-      }
-
-      rowsCount = await normalizeOfficialExport(officialPaths);
-      const normalizedRows = await assertNormalizedMetricCoverage();
-      const coverage = validateTargetCoverage(works, normalizedRows);
-      if (!coverage.ok) {
-        throw new Error(
-          `B 站官方导出未覆盖全部目标稿件：缺少 ${coverage.missing.length} 条（${coverage.missing.slice(0, 5).join('；')}）`
+      const batch = batches[batchIndex];
+      try {
+        const batchSelectedCount = await selectWorkBatch(
+          dataFrame,
+          batch,
+          batchIndex,
+          batches.length,
+          works.length,
+          completedWorks,
         );
+        const officialPath = await downloadOfficialExport(page, dataFrame);
+        officialPaths.push(officialPath);
+        selectedCount += batchSelectedCount;
+        completedWorks += batch.length;
+        await updateProgress({
+          phase: 'official_exporting',
+          message: `B 站官方分批导出已完成 ${completedWorks}/${works.length} 条`,
+          ...buildBilibiliOfficialProgressSnapshot({
+            totalWorks: works.length,
+            completedWorks,
+            currentIndex: completedWorks,
+          }),
+        });
+      } catch (error) {
+        throw buildOfficialBatchError(batchIndex, error);
       }
-      if (selectedCount > 0 && rowsCount <= 0) {
-        throw new Error(`B 站官方导出文件未解析出稿件数据：${officialPaths.map((item) => path.basename(item)).join(', ')}`);
-      }
+    }
+
+    if (officialPaths.length !== officialPlan.expectedFiles || selectedCount !== officialPlan.totalWorks) {
+      throw new Error(
+        `B 站官方分批导出不完整：目标 ${officialPlan.totalWorks} 条，已选 ${selectedCount} 条，文件 ${officialPaths.length}/${officialPlan.expectedFiles} 个`,
+      );
+    }
+
+    const rowsCount = await normalizeOfficialExport(officialPaths);
+    const normalizedRows = await assertNormalizedMetricCoverage();
+    const coverage = validateTargetCoverage(works, normalizedRows);
+    if (!coverage.ok) {
+      throw new Error(
+        `B 站官方导出未覆盖全部目标稿件：缺少 ${coverage.missing.length} 条（${coverage.missing.slice(0, 5).join('；')}）`,
+      );
+    }
+    if (rowsCount !== works.length) {
+      throw new Error(`B 站官方导出条数不一致：目标 ${works.length} 条，归一化后 ${rowsCount} 条`);
     }
 
     await updateProgress({

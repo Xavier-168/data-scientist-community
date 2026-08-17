@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import {
   activateBrowserApp,
   isPlaceholderBrowserUrl,
+  isTransientNavigationError,
   navigateAuthCandidates,
   prepareAuthPage,
   resolveBrowserAppName,
@@ -123,6 +124,45 @@ await (async function testNavigateCandidatesRetriesWithFreshPage() {
   assert.deepEqual(firstAttempt.__meta.gotoCalls, ['https://bad.example']);
   assert.deepEqual(retry.__meta.gotoCalls, ['https://good.example']);
   assert.equal(retry.url(), 'https://good.example/login');
+})();
+
+await (async function testNavigateSameUrlRetriesOnlyTransientFailures() {
+  const blank = makePage('about:blank');
+  const failedAttempt = makePage('about:blank', {
+    gotoThrowsFor: ['https://creator.example/manage'],
+  });
+  const recoveredAttempt = makePage('about:blank');
+  const context = makeContext([blank], [failedAttempt, recoveredAttempt]);
+  const slept = [];
+  const page = await navigateAuthCandidates(
+    context,
+    blank,
+    ['https://creator.example/manage'],
+    {
+      settleMs: 0,
+      sameUrlAttempts: 3,
+      retryDelaysMs: [3000, 8000],
+      sleep: async (delayMs) => slept.push(delayMs),
+      shouldRetry: () => true,
+    },
+  );
+  assert.equal(page, recoveredAttempt);
+  assert.deepEqual(failedAttempt.__meta.gotoCalls, ['https://creator.example/manage']);
+  assert.deepEqual(recoveredAttempt.__meta.gotoCalls, ['https://creator.example/manage']);
+  assert.equal(failedAttempt.__meta.closed, true);
+  assert.deepEqual(slept, [3000]);
+})();
+
+await (async function testTransientNavigationClassifierIsNarrow() {
+  assert.equal(
+    isTransientNavigationError(new Error('page.goto: net::ERR_CONNECTION_CLOSED')),
+    true,
+  );
+  assert.equal(
+    isTransientNavigationError(new Error('page.goto: Timeout 30000ms exceeded.')),
+    true,
+  );
+  assert.equal(isTransientNavigationError(new Error('登录状态失效')), false);
 })();
 
 await (async function testPrepareAuthPageActivatesVisibleBrowserOnMac() {

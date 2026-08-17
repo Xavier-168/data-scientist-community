@@ -4,6 +4,8 @@ Data Scientist Community is a local-first macOS tool that helps creators collect
 
 This is an independent community project. It is not affiliated with, endorsed by, or officially partnered with any supported platform or Feishu.
 
+Latest candidate: [`v0.1.0-rc.2` release notes](docs/RELEASE_NOTES_v0.1.0-rc.2.md) (Chinese).
+
 ## A note from the creator
 
 Hi! I am Xiaoyao, the technology creator behind **Zhao Xiaoyao Xavier** on Douyin. This is the first repository I have published on GitHub. Since becoming a Vibe Coder, I have spent almost every day building tools and workflows that solve real problems in my own work.

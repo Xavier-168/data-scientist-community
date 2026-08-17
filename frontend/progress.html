@@ -5,20 +5,22 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>数据科学家 Community · Console</title>
   <link rel="stylesheet" href="/assets/progress-apple-theme.css">
+  <link rel="stylesheet" href="/assets/progress-figma-dashboard.css">
 </head>
 <body>
 
+<div id="viewport-stage">
 <div id="app">
   <!-- 侧边栏 Sidebar -->
   <aside class="sidebar">
     <div class="brand">
       <div class="brand-icon">D</div>
-      <h1>数据工作台</h1>
+      <h1>数据科学家</h1>
     </div>
     
     <nav class="nav-menu">
       <button class="nav-item active" data-view="dashboard">
-        <i>◱</i> <span>主仪表盘</span>
+        <i>▣</i> <span>主仪表盘</span>
       </button>
       <button class="nav-item" data-view="history">
         <i>◷</i> <span>同步记录</span>
@@ -32,17 +34,7 @@
 
     <div id="update-widget" class="mailbox-card">
       <button class="mailbox-card-main" id="btn-mailbox-open-sidebar" type="button">
-        <span class="mailbox-logo" aria-hidden="true">
-          <svg class="mailbox-icon" viewBox="0 0 72 72" focusable="false">
-            <path d="M10 52V36c0-11.6 9.4-21 21-21h24c5.5 0 10 4.5 10 10v27H10Z"/>
-            <path d="M31 15c7.5 5.2 11.5 12.6 11.5 21v16"/>
-            <path d="M21.5 35.5H31"/>
-            <path d="M50 10v24"/>
-            <path d="M50 10h16v12H50"/>
-            <circle cx="50" cy="38" r="5.5"/>
-            <path d="M34 52v10h12V52"/>
-          </svg>
-        </span>
+        <span class="mailbox-logo" aria-hidden="true"><img src="/assets/figma/mailbox.svg" alt=""></span>
         <span class="mailbox-card-copy">
           <strong>产品信箱</strong>
         </span>
@@ -50,19 +42,10 @@
       </button>
     </div>
 
-    <div class="sidebar-status">
-      <div class="status-indicator">
-        <div class="dot" id="ind-license"></div>
-        <span id="txt-license">许可证</span>
-      </div>
-      <div class="status-indicator">
-        <div class="dot" id="ind-backend"></div>
-        <span id="txt-backend">后端连接</span>
-      </div>
-      <div class="status-indicator">
-        <div class="dot" id="ind-feishu"></div>
-        <span id="txt-feishu">飞书同步就绪</span>
-      </div>
+    <div class="runtime-status-sensors" aria-hidden="true">
+      <span id="ind-license" class="dot"></span><span id="txt-license">本地访问</span>
+      <span id="ind-backend" class="dot"></span><span id="txt-backend">连接中</span>
+      <span id="ind-feishu" class="dot"></span><span id="txt-feishu">未启用</span>
     </div>
   </aside>
 
@@ -86,11 +69,11 @@
           <div class="page-subtitle" id="dash-baseline">--</div>
         </div>
         <div class="header-actions">
-          <button class="btn btn-secondary" id="btn-auth-all" title="对当前已选平台执行一键授权" style="display:none;">一键授权所选平台</button>
-          <button class="btn btn-secondary" id="btn-download-excel" title="下载汇总Excel">⤓ 导出Excel</button>
-          <button class="btn btn-secondary" id="btn-sync-feishu">仅同步飞书</button>
+          <button class="btn btn-secondary" id="btn-download-excel" title="下载汇总Excel">导出 Excel</button>
           <button class="btn btn-secondary" id="btn-rerun">修改同步日期</button>
-          <button class="btn btn-primary" id="btn-run-all">▶ 开始全面同步</button>
+          <button class="btn btn-secondary" id="btn-sync-feishu">同步飞书</button>
+          <button class="btn btn-primary" id="btn-run-all">开始全面同步</button>
+          <button class="btn btn-primary" id="btn-auth-all" title="对当前已选平台执行一键授权" style="display:none;">账号授权</button>
         </div>
       </div>
 
@@ -105,7 +88,7 @@
           <div class="metric-value" id="m-auth-count">-</div>
         </div>
         <div class="metric-card">
-          <div class="metric-title">汇总数据行数</div>
+          <div class="metric-title">已采集数据行</div>
           <div class="metric-value" id="m-total-rows">-</div>
         </div>
         <div class="metric-card">
@@ -117,6 +100,14 @@
       <!-- 动态进行中任务面板 -->
       <div class="task-pane" id="dash-task-pane">
         <div class="task-pane-header">
+          <div class="task-baseline-block">
+            <span>数据同步基线</span>
+            <strong id="task-baseline-range">--</strong>
+          </div>
+          <div class="task-current-block">
+            <span>当前平台</span>
+            <strong id="task-current-platform">等待开始</strong>
+          </div>
           <div class="task-copy">
             <div class="task-kicker">
               <span class="task-live-dot" aria-hidden="true"></span>
@@ -128,7 +119,7 @@
             </div>
           </div>
           <div class="task-progress-score" aria-hidden="true">
-            <span class="task-progress-label">PROGRESS</span>
+            <span class="task-progress-label">进度</span>
             <span class="task-progress-number"><strong id="task-progress-percent">0</strong><span>%</span></span>
           </div>
         </div>
@@ -164,11 +155,19 @@
         </div>
       </div>
 
-      <!-- 平台网格 -->
-      <h3 style="font-size: 16px; margin-top: 16px; font-weight: 600;">监控面板</h3>
-      <div class="grid-3" id="platform-grid-container">
-        <!-- JS将在此渲染平台卡片 -->
-      </div>
+      <!-- 平台监控表 -->
+      <section class="platform-table-shell" aria-label="平台采集状态">
+        <div class="platform-table-head" aria-hidden="true">
+          <span>平台</span><span>状态</span><span>任务进度</span><span>本次获取</span><span>跳过</span><span>失败</span><span>状态</span><span>授权</span><span>操作</span>
+        </div>
+        <div class="platform-table-body" id="platform-grid-container">
+          <!-- JS将在此渲染平台行 -->
+        </div>
+        <div class="platform-table-footer">
+          <span id="platform-row-count">共 0 条平台数据</span>
+          <div class="platform-pagination" aria-hidden="true"><span>‹</span><strong>1</strong><span>›</span><em>10 条/页</em></div>
+        </div>
+      </section>
     </div>
 
     <!-- 视图 2: 历史记录 History -->
@@ -186,6 +185,7 @@
     </div>
     
   </main>
+</div>
 </div>
 
 <!-- ================= 弹窗与浮层 ================= -->
@@ -357,6 +357,29 @@
   </div>
 </div>
 
+<!-- 4. Excel 导出范围与保存位置 -->
+<div id="modal-excel-export" class="modal-backdrop hidden" role="dialog" aria-modal="true" aria-labelledby="modal-excel-export-title">
+  <div class="modal-window excel-export-modal-window">
+    <div class="modal-header">
+      <h3 id="modal-excel-export-title">导出 Excel</h3>
+      <button class="btn btn-ghost" id="modal-excel-export-close" type="button" aria-label="关闭导出窗口">✕</button>
+    </div>
+    <div class="modal-body">
+      <p class="excel-export-intro">选择需要导出的数据范围，然后在系统窗口中选择保存位置。</p>
+      <div id="excel-export-options" class="excel-export-options" role="radiogroup" aria-label="Excel 导出范围"></div>
+      <p id="excel-export-status" class="excel-export-status" aria-live="polite"></p>
+      <div id="excel-export-path-wrap" class="excel-export-path-wrap hidden">
+        <span>保存位置</span>
+        <code id="excel-export-path"></code>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn btn-secondary" id="modal-excel-export-cancel" type="button">取消</button>
+      <button class="btn btn-primary" id="modal-excel-export-confirm" type="button">选择保存位置</button>
+    </div>
+  </div>
+</div>
+
 <!-- Toasts 容器 -->
 <div id="toast-container"></div>
 
@@ -372,6 +395,12 @@
     bilibili: "哔哩哔哩 (Bilibili)",
     kuaishou: "快手 (Kuaishou)"
   };
+  const SHORT_LABELS = {
+    douyin: "抖音",
+    xiaohongshu: "小红书",
+    bilibili: "B站",
+    kuaishou: "快手"
+  };
   
   // Platform ID -> backend single-run route mapping
   const RUN_ROUTE_MAP = {
@@ -384,11 +413,13 @@
   const SESSION_STORAGE_KEY = 'yrg_monitor_session_token';
   const DEFAULT_BUILD_VERSION = '1.0.6';
   const SIDEBAR_WIDTH_STORAGE_KEY = 'yrg_monitor_sidebar_width';
-  const SIDEBAR_DEFAULT_WIDTH = 260;
-  const SIDEBAR_MIN_WIDTH = 160;
-  const SIDEBAR_MAX_WIDTH = 420;
+  const SIDEBAR_DEFAULT_WIDTH = 304;
+  const SIDEBAR_MIN_WIDTH = 304;
+  const SIDEBAR_MAX_WIDTH = 304;
   const MAIN_CONTENT_MIN_WIDTH = 860;
   const SIDEBAR_RESIZE_DISABLE_BREAKPOINT = 960;
+  const DASHBOARD_DESIGN_WIDTH = 1920;
+  const DASHBOARD_DESIGN_HEIGHT = 1080;
   const PAGE_URL = new URL(window.location.href);
   const HASH_SESSION_TOKEN = new URLSearchParams(window.location.hash.replace(/^#/, '')).get('session') || '';
   const QUERY_SESSION_TOKEN = PAGE_URL.searchParams.get('session') || '';
@@ -506,6 +537,8 @@
     mailboxOpen: false,
     forceWizard: false,
     sidebarWidth: readPersistedSidebarWidth(),
+    excelExportSelection: 'all',
+    excelExportBusy: false,
   };
   const HISTORY_POLL_INTERVAL_MS = 60000;
   const UPDATE_CHECK_INTERVAL_MS = 6 * 60 * 60 * 1000;
@@ -529,6 +562,41 @@
   let collectionJourneyRunActive = false;
   const STALE_RUNNING_THRESHOLD_MS = 10 * 60 * 1000; // 10 minutes without update = stale
   let staleRunningNotified = new Set();
+  let dashboardScaleFrame = null;
+
+  function applyDashboardViewportScale() {
+    const app = document.getElementById('app');
+    const stage = document.getElementById('viewport-stage');
+    if (!app || !stage) return;
+    const viewportWidth = Math.max(window.innerWidth || 0, document.documentElement?.clientWidth || 0, 1);
+    const viewportHeight = Math.max(window.innerHeight || 0, document.documentElement?.clientHeight || 0, 1);
+    const scale = Math.min(viewportWidth / DASHBOARD_DESIGN_WIDTH, viewportHeight / DASHBOARD_DESIGN_HEIGHT);
+    const visualWidth = DASHBOARD_DESIGN_WIDTH * scale;
+    const visualHeight = DASHBOARD_DESIGN_HEIGHT * scale;
+    const offsetX = Math.max(0, (viewportWidth - visualWidth) / 2);
+    const offsetY = Math.max(0, (viewportHeight - visualHeight) / 2);
+    const sidebarEdge = offsetX + (SIDEBAR_DEFAULT_WIDTH * scale);
+    app.style.setProperty('--dashboard-scale', String(scale));
+    app.style.width = `${DASHBOARD_DESIGN_WIDTH}px`;
+    app.style.height = `${DASHBOARD_DESIGN_HEIGHT}px`;
+    app.style.left = `${offsetX}px`;
+    app.style.top = `${offsetY}px`;
+    app.dataset.viewportScale = scale.toFixed(6);
+    app.dataset.designWidth = String(DASHBOARD_DESIGN_WIDTH);
+    app.dataset.designHeight = String(DASHBOARD_DESIGN_HEIGHT);
+    stage.style.setProperty('--viewport-sidebar-edge', `${sidebarEdge}px`);
+    stage.dataset.sidebarEdge = sidebarEdge.toFixed(3);
+    stage.dataset.letterboxX = offsetX.toFixed(3);
+    stage.dataset.letterboxY = offsetY.toFixed(3);
+  }
+
+  function scheduleDashboardViewportScale() {
+    if (dashboardScaleFrame) cancelAnimationFrame(dashboardScaleFrame);
+    dashboardScaleFrame = requestAnimationFrame(() => {
+      dashboardScaleFrame = null;
+      applyDashboardViewportScale();
+    });
+  }
 
   function escapeHtml(value) {
     return String(value ?? '')
@@ -946,6 +1014,13 @@
     collectionJourneyTargetPercent = 0;
     collectionJourneyLatestState = null;
     collectionJourneyRunActive = false;
+    const journeyEl = document.getElementById('task-journey');
+    journeyEl?.style.setProperty('--journey-progress', '0%');
+    journeyEl?.setAttribute('aria-valuenow', '0');
+    journeyEl?.setAttribute('aria-valuetext', '等待开始，总体进度 0%');
+    document.getElementById('task-route-fill')?.style.setProperty('width', '0%');
+    const percentEl = document.getElementById('task-progress-percent');
+    if (percentEl) percentEl.textContent = '0';
   }
 
   function animateCollectionJourneyProgress(targetPercent, journey) {
@@ -1650,10 +1725,10 @@
         creating_base: '正在自动创建多维表格...',
       };
       const descriptions = {
-        connecting: isUserAuth ? '正在生成授权链接，请稍候...' : '正在生成登录链接，请稍候...',
+        connecting: isUserAuth ? '正在生成授权链接；首次初始化可能需要 1–2 分钟，生成后会自动打开。' : '正在生成登录链接；首次初始化可能需要 1–2 分钟，生成后会自动打开。',
         scan_qr: isUserAuth
-          ? '应用已创建成功！现在需要再授权一次，让本工具能以你的名义写入飞书多维表格。'
-          : '请用飞书扫码或点击下方链接，完成开放平台应用创建。',
+          ? '应用已创建成功！授权页面已尝试自动打开；如果没有出现，请点击下方按钮。'
+          : '飞书登录页面已尝试自动打开；如果没有出现，请点击下方按钮完成应用创建。',
         creating_base: '扫码成功，正在创建数据表格...',
       };
 
@@ -1902,6 +1977,57 @@
     return checkedAt ? `最近检查 ${checkedAt}` : '等待首次后台检查';
   }
 
+  function platformCollectionState(progress) {
+    const uiStatus = String(progress?.ui_status || '').trim();
+    if (uiStatus === 'running') return { label: '采集进行中', className: 'is-running' };
+    if (uiStatus === 'queued') return { label: '排队等待', className: 'is-queued' };
+    if (uiStatus === 'authorizing') return { label: '授权进行中', className: 'is-authorizing' };
+    if (uiStatus === 'failed') return { label: '采集异常', className: 'is-failed' };
+    if (['done', 'success', 'completed'].includes(uiStatus)) return { label: '采集完成', className: 'is-complete' };
+    const message = String(progress?.message || '');
+    if (message.includes('完成')) return { label: '采集完成', className: 'is-complete' };
+    return { label: '等待开始', className: 'is-idle' };
+  }
+
+  function platformProgressSnapshot(progress, collectionState) {
+    const success = Number(progress?.successWorks || 0);
+    const skipped = Number(progress?.skippedWorks || 0);
+    const failed = Number(progress?.failedWorks || 0);
+    let total = Number(progress?.totalWorks || 0);
+    let processed = Number(progress?.processedWorks || 0);
+    if (total <= 0 && collectionState.className === 'is-complete') {
+      total = Math.max(success + skipped + failed, success);
+      processed = total;
+    }
+    if (total > 0 && collectionState.className === 'is-complete') processed = total;
+    const percent = total > 0 ? Math.min(100, Math.max(0, Math.round((processed / total) * 100))) : 0;
+    return {
+      total,
+      processed,
+      percent,
+      ratio: total > 0 ? `${processed}/${total}` : `${processed}/–`,
+    };
+  }
+
+  function formatFigmaBaselineDate(value) {
+    const match = String(value || '').trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (!match) return String(value || '未知');
+    return `${Number(match[1])}/${Number(match[2])}/${Number(match[3])}`;
+  }
+
+  function platformIconMarkup(platformId) {
+    if (platformId === 'xiaohongshu') {
+      return '<span class="platform-source-icon platform-source-icon-xhs" aria-hidden="true">小红书</span>';
+    }
+    const paths = {
+      douyin: '/assets/platforms/douyin.svg',
+      bilibili: '/assets/platforms/bilibili.svg',
+      kuaishou: '/assets/platforms/kuaishou.svg',
+    };
+    const src = paths[platformId] || '';
+    return `<span class="platform-source-icon" aria-hidden="true"><img src="${src}" alt=""></span>`;
+  }
+
   // 渲染仪表盘数据
   function renderDashboard() {
     if (!state.progress || !state.configSummary) return;
@@ -1912,8 +2038,13 @@
     lastDashboardRenderKey = dashboardRenderKey;
 
     // Headings
-    document.getElementById('dash-project-name').innerText = state.config?.workspace_name || "本地数据工作台";
+    document.getElementById('dash-project-name').innerText = state.config?.workspace_name || "赵逍遥工作台";
     document.getElementById('dash-baseline').innerText = `同步数据基线：自 ${state.config?.min_publish_date || '未知'} 起`;
+    document.getElementById('task-baseline-range').innerText = `${formatFigmaBaselineDate(state.config?.min_publish_date)} —— 至今`;
+    const activePlatformId = String(state.progress?.summary?.active_platform || '');
+    document.getElementById('task-current-platform').innerText = activePlatformId
+      ? (LABELS[activePlatformId] || SHORT_LABELS[activePlatformId] || activePlatformId)
+      : (state.progress?.running ? '正在准备' : '等待开始');
 
     // Metrics
     document.getElementById('m-enabled-count').innerText = state.configSummary.enabled_platform_count || 0;
@@ -1930,25 +2061,37 @@
     if (authAllBtn) {
       authAllBtn.style.display = pendingAuthPlatforms.length > 0 ? '' : 'none';
       authAllBtn.disabled = Boolean(state.progress.running) || pendingAuthPlatforms.length === 0;
-      authAllBtn.innerText = pendingAuthPlatforms.length > 1 ? `一键授权 ${pendingAuthPlatforms.length} 个平台` : '一键授权所选平台';
+      authAllBtn.innerText = pendingAuthPlatforms.length > 1 ? `授权 ${pendingAuthPlatforms.length} 个平台` : '账号授权';
     }
+    const runAllBtn = document.getElementById('btn-run-all');
+    if (runAllBtn) runAllBtn.style.display = pendingAuthPlatforms.length > 0 ? 'none' : '';
 
     // Running Pane
     const taskPane = document.getElementById('dash-task-pane');
     const feishuRuntime = state.progress.summary?.feishu || {};
     const authHealthChecking = state.progress.summary?.current_stage === 'auth_checking';
+    const accountAuthorizing = state.progress.summary?.current_stage === 'authorizing';
     if (state.progress.running && authHealthChecking) {
        resetCollectionJourneyVisualProgress();
        taskPane.classList.add('active', 'is-auth-checking');
-       taskPane.classList.remove('is-running', 'needs-action');
+       taskPane.classList.remove('is-running', 'is-authorizing', 'needs-action', 'is-idle');
        const checkingPlatform = state.progress.summary?.auth_health?.active_platform || state.progress.summary?.active_platform;
        document.getElementById('task-step-title').innerText = '正在检查账号登录态';
        document.getElementById('task-step-desc').innerText = checkingPlatform
          ? `正在后台检查 ${LABELS[checkingPlatform] || checkingPlatform}，不会打开登录窗口`
          : '正在后台检查账号状态，不会打开登录窗口';
+    } else if (state.progress.running && accountAuthorizing) {
+       resetCollectionJourneyVisualProgress();
+       taskPane.classList.add('active', 'is-authorizing');
+       taskPane.classList.remove('is-running', 'is-auth-checking', 'needs-action', 'is-idle');
+       const authorizingPlatform = state.progress.summary?.active_platform;
+       document.getElementById('task-step-title').innerText = '正在进行账号授权';
+       document.getElementById('task-step-desc').innerText = authorizingPlatform
+         ? `正在打开 ${LABELS[authorizingPlatform] || authorizingPlatform} 登录窗口，请在浏览器完成登录`
+         : '正在打开账号登录窗口，请在浏览器完成登录';
     } else if (state.progress.running) {
        taskPane.classList.add('active', 'is-running');
-       taskPane.classList.remove('needs-action', 'is-auth-checking');
+       taskPane.classList.remove('needs-action', 'is-authorizing', 'is-auth-checking', 'is-idle');
        renderCollectionJourney(state.progress, enabledPlatforms);
        const isFeishuImporting = state.progress.summary?.current_stage === 'importing' && feishuRuntime.status === 'running';
        if (isFeishuImporting) {
@@ -1969,7 +2112,7 @@
        const taskDesc = document.getElementById('task-step-desc');
        const safeUrl = safeHref(feishuRuntime.verification_url || '');
        taskPane.classList.add('active');
-       taskPane.classList.remove('is-running', 'is-auth-checking');
+       taskPane.classList.remove('is-running', 'is-authorizing', 'is-auth-checking', 'is-idle');
        taskPane.classList.add('needs-action');
        taskTitle.innerText = '飞书需要重新授权';
        taskDesc.innerHTML = `
@@ -1983,77 +2126,54 @@
        `;
     } else {
        resetCollectionJourneyVisualProgress();
-       taskPane.classList.remove('active', 'is-running', 'is-auth-checking', 'needs-action');
+       taskPane.classList.add('active', 'is-idle');
+       taskPane.classList.remove('is-running', 'is-authorizing', 'is-auth-checking', 'needs-action');
+       document.getElementById('task-step-title').innerText = '等待开始采集';
+       document.getElementById('task-step-desc').innerText = '选择同步日期后开始采集';
+       document.getElementById('task-progress-percent').innerText = '0';
+       document.getElementById('task-journey').setAttribute('aria-valuenow', '0');
     }
 
-    // Platform Grid
+    // Platform Table
     const grid = document.getElementById('platform-grid-container');
     let html = '';
-    // 我们显示所有的平台，禁用的灰显
     PLATFORMS.forEach(p => {
        const isEnabled = enabledPlatforms.includes(p);
        const pData = state.progress[p] || {};
-       const isAuth = pData.auth_status === 'authorized';
        const needsAuth = ['unauthorized', 'expired', 'needs_auth'].includes(String(pData.auth_status || '').trim());
-       const healthStatus = String(pData.auth_health_status || 'unknown');
+       const isAuthorizing = String(pData.ui_status || '').trim() === 'authorizing';
        const healthText = authHealthDisplay(pData);
-       const needsAuthLabel = pData.auth_status === 'unauthorized'
-         ? '尚未授权'
-         : (pData.auth_status === 'needs_auth' ? '需要授权' : '授权已过期');
-       let statusBadgeStr = needsAuth
-         ? `<span class="badge red">${needsAuthLabel}</span>`
-         : (healthStatus === 'unknown' || healthStatus === 'skipped'
-           ? '<span class="badge yellow">已授权 · 待复核</span>'
-           : '<span class="badge green">已授权 · 已检查</span>');
-       
-       // 优化：仅渲染启用的平台，防止主屏幕超长溢出（实现自适应免滑动要求）
-       if(!isEnabled) {
-          return; // skip rendering
-       }
-       
-       if (pData.ui_status === 'authorizing') {
-         statusBadgeStr = `<span class="badge yellow">授权中...</span>`;
-       } else if (pData.ui_status === 'queued') {
-         statusBadgeStr = `<span class="badge yellow">排队等待...</span>`;
-       } else if (pData.ui_status === 'running') {
-         statusBadgeStr = `<span class="badge yellow">采集进行中...</span>`;
-       } else if (pData.ui_status === 'failed') {
-         statusBadgeStr = `<span class="badge red">采集异常</span>`;
-       }
+
 
        const safe = (val) => val || 0;
+       const collectionState = isEnabled
+         ? platformCollectionState(pData)
+         : { label: '未启用', className: 'is-idle' };
+       const progressSnapshot = platformProgressSnapshot(pData, collectionState);
+       const healthClass = !isEnabled ? 'is-disabled' : (isAuthorizing ? 'is-pending' : (needsAuth ? 'is-abnormal' : 'is-normal'));
+       const healthLabel = !isEnabled ? '未启用' : (isAuthorizing ? '授权中' : (needsAuth ? '异常' : '正常'));
 
        html += `
-         <div class="platform-card ${isEnabled ? '' : 'disabled'}">
-           <div class="platform-header">
-             <div class="platform-name">${LABELS[p]}</div>
-             ${statusBadgeStr}
+         <div class="platform-card platform-table-row" data-platform="${p}" data-enabled="${isEnabled ? 'true' : 'false'}">
+           <div class="platform-primary">${platformIconMarkup(p)}<span class="platform-name">${SHORT_LABELS[p]}</span></div>
+           <div><span class="collection-status ${collectionState.className}">${collectionState.label}</span></div>
+           <div class="platform-progress-cell">
+             <span class="platform-progress-ratio">${progressSnapshot.ratio}</span>
+             <span class="platform-progress-track"><i style="width:${progressSnapshot.percent}%"></i></span>
+             <span class="platform-progress-percent">${progressSnapshot.percent}%</span>
            </div>
-           <div style="font-size:12px; color:var(--text-muted); margin-bottom:4px;">
-             ${escapeHtml(pData.message || (isEnabled ? '待机中' : '此数据源已被禁用'))}
-           </div>
-           <div class="platform-auth-health" style="font-size:11px; color:var(--text-muted); margin-bottom:8px;">
-             ${escapeHtml(healthText)}
-           </div>
-           
-           <div class="platform-stats">
-             <div class="stat-item"><span class="stat-label">本次获取</span><span class="stat-val" style="color:var(--green-text);">${safe(pData.successWorks)}</span></div>
-             <div class="stat-item"><span class="stat-label">跳过</span><span class="stat-val">${safe(pData.skippedWorks)}</span></div>
-             <div class="stat-item"><span class="stat-label">失败</span><span class="stat-val" style="color:var(--danger-text);">${safe(pData.failedWorks)}</span></div>
-           </div>
-
-           <div class="platform-actions">
-             ${isEnabled ? `
-               <button class="btn btn-ghost" style="padding: 4px 8px; font-size:12px;" onclick="triggerAuth('${p}')">${needsAuth ? '去授权' : '账号重授权'}</button>
-               ${needsAuth ? '' : `<button class="btn btn-secondary" style="padding: 4px 12px; font-size:12px;" onclick="triggerRunSingle('${p}')">单跑此源</button>`}
-             ` : `
-               <button class="btn btn-ghost" style="padding: 4px 8px; font-size:12px;" onclick="document.getElementById('btn-settings').click()">去设置中启用</button>
-             `}
-           </div>
+           <div class="platform-metric">${safe(pData.successWorks)}</div>
+           <div class="platform-metric">${safe(pData.skippedWorks)}</div>
+           <div class="platform-metric">${safe(pData.failedWorks)}</div>
+           <div class="platform-health ${healthClass}" title="${escapeHtml(healthText)}"><i></i><span>${healthLabel}</span></div>
+           <div class="platform-auth-action">${isEnabled ? `<button type="button" onclick="triggerAuth('${p}')"${isAuthorizing ? ' disabled aria-busy="true"' : ''}>${isAuthorizing ? '授权中' : (needsAuth ? '去授权' : '账号授权')}</button>` : ''}</div>
+           <div class="platform-run-action">${isEnabled && !needsAuth ? `<button type="button" onclick="triggerRunSingle('${p}')">▶ 单跑此源</button>` : ''}</div>
+           <span class="platform-row-message">${escapeHtml(pData.message || '待机中')}</span>
          </div>
        `;
     });
     grid.innerHTML = html;
+    document.getElementById('platform-row-count').innerText = `共 ${PLATFORMS.length} 条平台数据`;
   }
 
   function formatFeishuHistorySummary(summary) {
@@ -2427,98 +2547,229 @@
     }
   });
 
-  // 主页操作：导出 Excel——优先弹系统保存对话框让用户选择保存位置
-  // 注意：监管模式下会话令牌只认 X-YRG-Session 请求头（查询参数被忽略，
-  // window.open 无法带自定义头），所有导出请求必须走带头的 fetch。
-  async function fetchExcelBlob(downloadUrl) {
-    const resp = await fetch(withSessionQuery(downloadUrl), {
-      headers: { 'X-YRG-Session': SESSION_TOKEN },
-    });
-    if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-    return await resp.blob();
+
+  function excelExportChoices() {
+    const enabled = Array.isArray(state.config?.enabled_platforms)
+      ? state.config.enabled_platforms.filter((platform) => PLATFORMS.includes(platform))
+      : [];
+    return [
+      {
+        key: 'all',
+        label: '全平台汇总',
+        description: enabled.length
+          ? '汇总当前启用的 ' + enabled.length + ' 个平台'
+          : '汇总当前已有平台数据',
+      },
+      ...enabled.map((platform) => ({
+        key: platform,
+        label: SHORT_LABELS[platform] || LABELS[platform] || platform,
+        description: '仅导出该平台数据',
+      })),
+    ];
   }
 
-  async function saveExcelWithPicker(downloadUrl, label) {
-    if (!window.showSaveFilePicker) return false;
-    try {
-      const date = new Date().toISOString().slice(0, 10);
-      const handle = await window.showSaveFilePicker({
-        suggestedName: `数据科学家-${label}-${date}.xlsx`,
-        startIn: 'desktop',
-        types: [{
-          description: 'Excel 工作簿',
-          accept: { 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'] },
-        }],
+  function suggestedExcelFilename(selection) {
+    const names = {
+      all: '全平台数据汇总.xlsx',
+      douyin: '抖音数据.xlsx',
+      xiaohongshu: '小红书数据.xlsx',
+      bilibili: 'B站数据.xlsx',
+      kuaishou: '快手数据.xlsx',
+    };
+    return names[selection?.key] || '自媒体数据.xlsx';
+  }
+
+  function renderExcelExportChoices() {
+    const choices = excelExportChoices();
+    if (!choices.some((choice) => choice.key === state.excelExportSelection)) {
+      state.excelExportSelection = 'all';
+    }
+    const container = document.getElementById('excel-export-options');
+    if (!container) return;
+    container.innerHTML = choices.map((choice) => {
+      const selected = choice.key === state.excelExportSelection;
+      return '<button class="excel-export-option' + (selected ? ' selected' : '') + '" type="button"'
+        + ' role="radio" aria-checked="' + (selected ? 'true' : 'false') + '"'
+        + ' data-excel-export-key="' + escapeHtml(choice.key) + '">'
+        + '<span class="excel-export-option-indicator" aria-hidden="true"></span>'
+        + '<span class="excel-export-option-copy">'
+        + '<strong>' + escapeHtml(choice.label) + '</strong>'
+        + '<small>' + escapeHtml(choice.description) + '</small>'
+        + '</span></button>';
+    }).join('');
+    container.querySelectorAll('[data-excel-export-key]').forEach((button) => {
+      button.addEventListener('click', () => {
+        if (state.excelExportBusy) return;
+        state.excelExportSelection = button.dataset.excelExportKey || 'all';
+        renderExcelExportChoices();
       });
-      const writable = await handle.createWritable();
-      await writable.write(await fetchExcelBlob(downloadUrl));
-      await writable.close();
-      showToast(`已保存：${label}`, 'success');
-      return true;
-    } catch (err) {
-      if (err && err.name === 'AbortError') return true; // 用户取消了保存
-      return false; // 保存流程失败，回退浏览器下载
+    });
+  }
+
+  function setExcelExportModalVisible(visible) {
+    document.getElementById('modal-excel-export')?.classList.toggle('hidden', !visible);
+  }
+
+  function resetExcelExportResult() {
+    const status = document.getElementById('excel-export-status');
+    const pathWrap = document.getElementById('excel-export-path-wrap');
+    const path = document.getElementById('excel-export-path');
+    if (status) {
+      status.textContent = '';
+      status.className = 'excel-export-status';
     }
+    pathWrap?.classList.add('hidden');
+    if (path) path.textContent = '';
   }
 
-  async function downloadExcelViaBrowser(downloadUrl, label) {
-    const date = new Date().toISOString().slice(0, 10);
-    const blob = await fetchExcelBlob(downloadUrl);
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = `数据科学家-${label}-${date}.xlsx`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    setTimeout(() => URL.revokeObjectURL(a.href), 30000);
-  }
-
-  function excelDownloadUrlFor(chosen) {
-    return chosen.key === 'all'
-      ? withEnabledPlatformsQuery('/download-excel?file=all')
-      : `/download-excel?file=${chosen.key}`;
-  }
-
-  async function exportExcelChoice(chosen) {
-    const url = excelDownloadUrlFor(chosen);
-    if (await saveExcelWithPicker(url, chosen.label)) return;
-    try {
-      await downloadExcelViaBrowser(url, chosen.label);
-      showToast(`正在下载 ${chosen.label} Excel`, 'success');
-    } catch (err) {
-      showToast(`导出失败：${err && err.message ? err.message : '未知错误'}`, 'error');
+  function setExcelExportBusy(busy) {
+    state.excelExportBusy = Boolean(busy);
+    const confirm = document.getElementById('modal-excel-export-confirm');
+    const cancel = document.getElementById('modal-excel-export-cancel');
+    const close = document.getElementById('modal-excel-export-close');
+    if (confirm) {
+      confirm.disabled = state.excelExportBusy;
+      confirm.textContent = state.excelExportBusy ? '正在保存…' : '选择保存位置';
     }
+    if (cancel) cancel.disabled = state.excelExportBusy;
+    if (close) close.disabled = state.excelExportBusy;
+    document.querySelectorAll('[data-excel-export-key]').forEach((button) => {
+      button.disabled = state.excelExportBusy;
+    });
   }
 
-  document.getElementById('btn-download-excel').addEventListener('click', () => {
-    const enabled = state.config?.enabled_platforms || [];
-    let options = [{ key: 'all', label: '全平台汇总数据' }];
-    enabled.forEach(p => options.push({ key: p, label: LABELS[p] }));
+  function openExcelExportModal() {
+    state.excelExportSelection = 'all';
+    resetExcelExportResult();
+    renderExcelExportChoices();
+    setExcelExportBusy(false);
+    setExcelExportModalVisible(true);
+  }
 
-    // 只有 1 个平台或没有：直接导出汇总
-    if (options.length <= 2) {
-      void exportExcelChoice(options[0]);
+  function handleExcelExportResult(result = {}) {
+    setExcelExportBusy(false);
+    const status = document.getElementById('excel-export-status');
+    const pathWrap = document.getElementById('excel-export-path-wrap');
+    const path = document.getElementById('excel-export-path');
+    if (result.cancelled) {
+      if (status) {
+        status.textContent = '已取消保存，你可以重新选择保存位置。';
+        status.className = 'excel-export-status';
+      }
+      return;
+    }
+    if (!result.ok) {
+      const message = result.message || 'Excel 保存失败，请重新选择位置后再试。';
+      if (status) {
+        status.textContent = message;
+        status.className = 'excel-export-status error';
+      }
+      showToast(message, 'error');
+      return;
+    }
+    if (status) {
+      status.textContent = 'Excel 已保存完成。';
+      status.className = 'excel-export-status success';
+    }
+    if (path && result.path) {
+      path.textContent = result.path;
+      pathWrap?.classList.remove('hidden');
+    }
+    showToast('Excel 已保存：' + (result.file_name || '导出文件'), 'success');
+  }
+
+  window.handleNativeExcelExportResult = handleExcelExportResult;
+
+  async function exportExcelToChosenLocation() {
+    if (state.excelExportBusy) return;
+    const choices = excelExportChoices();
+    const selection = choices.find((choice) => choice.key === state.excelExportSelection) || choices[0];
+    if (!selection) {
+      showToast('当前没有可导出的数据范围', 'error');
       return;
     }
 
-    // 多平台：原生 dialog 选择（点击选项本身就是用户激活）
-    const dialog = document.getElementById('excel-export-dialog');
-    const container = document.getElementById('excel-export-options');
-    container.innerHTML = '';
-    options.forEach(o => {
-      const btn = document.createElement('button');
-      btn.type = 'button';
-      btn.className = 'btn btn-secondary';
-      btn.style.width = '100%';
-      btn.textContent = o.label;
-      btn.addEventListener('click', () => {
-        dialog.close();
-        void exportExcelChoice(o);
-      });
-      container.appendChild(btn);
+    const platforms = selection.key === 'all'
+      ? (state.config?.enabled_platforms || []).filter((platform) => PLATFORMS.includes(platform))
+      : [];
+    const payload = {
+      file: selection.key,
+      platforms,
+      label: selection.label,
+      suggestedFilename: suggestedExcelFilename(selection),
+    };
+
+    resetExcelExportResult();
+    setExcelExportBusy(true);
+    const status = document.getElementById('excel-export-status');
+    if (status) status.textContent = '正在准备' + selection.label + '，请在系统窗口中选择保存位置。';
+
+    // Windows（WebView2）：File System Access API 弹系统保存对话框。监管模式
+    // 下会话令牌只认 X-YRG-Session 请求头，下载必须走带头的 fetch。
+    if (window.showSaveFilePicker) {
+      try {
+        const handle = await window.showSaveFilePicker({
+          suggestedName: payload.suggestedFilename,
+          startIn: 'desktop',
+          types: [{
+            description: 'Excel 工作簿',
+            accept: { 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'] },
+          }],
+        });
+        const excelParams = new URLSearchParams({ file: selection.key });
+        if (platforms.length) excelParams.set('platforms', platforms.join(','));
+        const resp = await fetch(withSessionQuery('/download-excel?' + excelParams.toString()), {
+          headers: { 'X-YRG-Session': SESSION_TOKEN },
+        });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const writable = await handle.createWritable();
+        await writable.write(await resp.blob());
+        await writable.close();
+        handleExcelExportResult({ ok: true, file_name: payload.suggestedFilename });
+      } catch (err) {
+        if (err && err.name === 'AbortError') {
+          handleExcelExportResult({ cancelled: true });
+        } else {
+          handleExcelExportResult({ ok: false, message: '保存失败：' + (err.message || err) });
+        }
+      }
+      return;
+    }
+
+    const nativeBridge = window.webkit?.messageHandlers?.excelExport;
+    if (nativeBridge && typeof nativeBridge.postMessage === 'function') {
+      try {
+        nativeBridge.postMessage(payload);
+      } catch (error) {
+        handleExcelExportResult({
+          ok: false,
+          message: '启动系统保存窗口失败：' + (error.message || error),
+        });
+      }
+      return;
+    }
+
+    const response = await api.post('/export-excel', {
+      file: selection.key,
+      platforms,
+    }, { timeoutMs: 600000 });
+    handleExcelExportResult(response || {
+      ok: false,
+      message: 'Excel 保存请求超时，请重试。',
     });
-    document.getElementById('excel-export-cancel').onclick = () => dialog.close();
-    dialog.showModal();
+  }
+
+  // 主页操作
+  document.getElementById('btn-download-excel').addEventListener('click', openExcelExportModal);
+  document.getElementById('modal-excel-export-close').addEventListener('click', () => {
+    if (!state.excelExportBusy) setExcelExportModalVisible(false);
+  });
+  document.getElementById('modal-excel-export-cancel').addEventListener('click', () => {
+    if (!state.excelExportBusy) setExcelExportModalVisible(false);
+  });
+  document.getElementById('modal-excel-export-confirm').addEventListener('click', () => {
+    void exportExcelToChosenLocation();
+
   });
 
   document.getElementById('btn-auth-all').addEventListener('click', () => triggerAuthAll());
@@ -3293,6 +3544,7 @@
 
   // 挂载
   window.addEventListener('DOMContentLoaded', () => {
+    applyDashboardViewportScale();
     initSidebarResize();
     document.getElementById('btn-update-check')?.addEventListener('click', () => checkForUpdates({ force: true }));
     document.getElementById('btn-update-check-drawer')?.addEventListener('click', () => checkForUpdates({ force: true }));
@@ -3311,6 +3563,8 @@
     renderUpdateWidget();
     startEngine();
   });
+
+  window.addEventListener('resize', scheduleDashboardViewportScale);
 
   window.addEventListener('focus', () => {
     runImmediateRefresh({ includeHistory: state.activeView === 'history' });

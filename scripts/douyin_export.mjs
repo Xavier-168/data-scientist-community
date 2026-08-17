@@ -4,13 +4,26 @@ import { promisify } from 'node:util';
 import { execFile } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { chromium } from 'playwright';
-import { navigateAuthCandidates, prepareAuthPage } from './browser_auth_utils.mjs';
+import {
+  isTransientNavigationError,
+  navigateAuthCandidates,
+  prepareAuthPage,
+} from './browser_auth_utils.mjs';
 import { resolveDownloadsDir, resolveProfileDir } from './runtime_paths.mjs';
 import { cleanCollectedTitle } from './title_cleanup_utils.mjs';
 
 const DEFAULT_PYTHON_BIN = process.platform === 'win32' ? 'python' : 'python3';
 const DEFAULT_BROWSER_CHANNEL = process.env.BROWSER_CHANNEL ?? 'chrome';
 const DEFAULT_DOWNLOAD_DIR = resolveDownloadsDir();
+const DEFAULT_NAVIGATION_RETRY_DELAYS_MS = [3000, 8000];
+
+function parseRetryDelays(value, fallback = DEFAULT_NAVIGATION_RETRY_DELAYS_MS) {
+  const parsed = String(value ?? '')
+    .split(',')
+    .map((item) => Number.parseInt(item.trim(), 10))
+    .filter((item) => Number.isFinite(item) && item >= 0);
+  return parsed.length > 0 ? parsed : [...fallback];
+}
 
 const CONFIG = {
   contentManageUrl: 'https://creator.douyin.com/creator-micro/content/manage',
@@ -29,6 +42,27 @@ const CONFIG = {
   downloadTimeoutMs: Number.parseInt(process.env.DOWNLOAD_TIMEOUT_MS ?? '120000', 10),
   slowMoMs: Number.parseInt(process.env.SLOW_MO_MS ?? '0', 10),
   listLoadTimeoutMs: Number.parseInt(process.env.LIST_LOAD_TIMEOUT_MS ?? '60000', 10),
+  navigationRetryAttempts: Math.max(
+    1,
+    Number.parseInt(process.env.NAVIGATION_RETRY_ATTEMPTS ?? '3', 10) || 3,
+  ),
+  navigationRetryDelaysMs: parseRetryDelays(process.env.NAVIGATION_RETRY_DELAYS_MS),
+  detailNavigationTimeoutMs: Math.max(
+    5000,
+    Number.parseInt(process.env.DETAIL_NAVIGATION_TIMEOUT_MS ?? '30000', 10) || 30000,
+  ),
+  navigationFailureCooldownMs: Math.max(
+    0,
+    Number.parseInt(process.env.NAVIGATION_FAILURE_COOLDOWN_MS ?? '15000', 10) || 0,
+  ),
+  maxConsecutiveNavigationFailures: Math.max(
+    1,
+    Number.parseInt(process.env.MAX_CONSECUTIVE_NAVIGATION_FAILURES ?? '2', 10) || 2,
+  ),
+  workIntervalMs: Math.max(
+    0,
+    Number.parseInt(process.env.WORK_INTERVAL_MS ?? '2000', 10) || 0,
+  ),
   startIndex: Number.parseInt(process.env.START_INDEX ?? '0', 10),
   minPublishDate: process.env.MIN_PUBLISH_DATE ?? '',
   maxPublishDate: process.env.MAX_PUBLISH_DATE ?? '',
@@ -36,6 +70,10 @@ const CONFIG = {
   refreshLatestCount: Number.parseInt(process.env.REFRESH_LATEST_COUNT ?? '0', 10),
   forceFullExport: (process.env.FORCE_FULL_EXPORT ?? 'false') === 'true',
   staleRoundsLimit: Number.parseInt(process.env.STALE_ROUNDS_LIMIT ?? '3', 10),
+  paginationStallRoundsLimit: Math.max(
+    4,
+    Number.parseInt(process.env.PAGINATION_STALL_ROUNDS_LIMIT ?? '8', 10) || 8,
+  ),
   // Controls how many merged files are included in the master excel (`all_videos.xlsx`).
   // Default is 0 (= no limit, include all merged files).
   masterLimit: Number.parseInt(process.env.MASTER_LIMIT ?? '0', 10),
@@ -92,6 +130,40 @@ function sanitizeFilename(name, maxLength = 80) {
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, maxLength);
+}
+
+async function defaultSleep(milliseconds) {
+  if (milliseconds <= 0) return;
+  await new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
+export async function retryTransientOperation(operation, options = {}) {
+  const maxAttempts = Math.max(1, Number.parseInt(options.maxAttempts ?? '1', 10) || 1);
+  const retryDelaysMs = Array.isArray(options.retryDelaysMs)
+    ? options.retryDelaysMs.map((item) => Math.max(0, Number(item) || 0))
+    : [];
+  const sleep = typeof options.sleep === 'function' ? options.sleep : defaultSleep;
+  const shouldRetry = typeof options.shouldRetry === 'function'
+    ? options.shouldRetry
+    : isTransientNavigationError;
+  const onRetry = typeof options.onRetry === 'function' ? options.onRetry : async () => {};
+
+  let lastError = null;
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await operation(attempt);
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error(String(error));
+      if (attempt >= maxAttempts || !shouldRetry(lastError)) {
+        lastError.attempts = attempt;
+        throw lastError;
+      }
+      const delayMs = retryDelaysMs[Math.min(attempt - 1, Math.max(retryDelaysMs.length - 1, 0))] || 0;
+      await onRetry({ attempt, nextAttempt: attempt + 1, delayMs, error: lastError });
+      await sleep(delayMs);
+    }
+  }
+  throw lastError || new Error('transient_operation_failed');
 }
 
 function sanitizeBaseName(name, maxLength = 100) {
@@ -342,8 +414,11 @@ export function classifyExportOutcome(metrics = {}) {
 export function assertExportOutcome(metrics = {}) {
   const outcome = classifyExportOutcome(metrics);
   if (outcome === 'success') return outcome;
+  const normalized = normalizeFinalMetrics(metrics);
   const error = new Error(
-    outcome === 'partial_failure' ? 'partial_failure' : 'all_candidates_failed'
+    outcome === 'partial_failure'
+      ? `partial_failure: 成功 ${normalized.successWorks} 条，失败 ${normalized.failedWorks} 条，待重试 ${normalized.queuedWorks} 条`
+      : 'all_candidates_failed',
   );
   error.code = outcome;
   throw error;
@@ -410,6 +485,14 @@ export function shouldStopDouyinListScan({
   if (apiReachedDateBoundary) return true;
   if (apiHasMore === true) return false;
   return staleRounds >= staleRoundsLimit;
+}
+
+export function isDouyinPaginationStalled({
+  apiHasMore = null,
+  staleRounds = 0,
+  stallRoundsLimit = 8,
+} = {}) {
+  return apiHasMore === true && staleRounds >= Math.max(1, Number(stallRoundsLimit) || 8);
 }
 
 async function scrollDouyinWorkList(page, cardLocator) {
@@ -627,6 +710,61 @@ async function waitForDetailReady(page, timeoutMs = 20000) {
   return false;
 }
 
+function isRetryableDetailNavigationError(error) {
+  return (
+    isTransientNavigationError(error)
+    || /作品详情页加载超时|未找到可导出数据入口/u.test(
+      String(error instanceof Error ? error.message : error || ''),
+    )
+  );
+}
+
+export function isDouyinDetailNavigationExhausted(error) {
+  return String(error?.code || '').trim() === 'douyin_detail_navigation_exhausted';
+}
+
+async function openDetailPageWithRetry(context, targetUrl) {
+  try {
+    return await retryTransientOperation(
+      async () => {
+        let candidatePage = null;
+        try {
+          candidatePage = await context.newPage();
+          await candidatePage.goto(targetUrl, {
+            waitUntil: 'domcontentloaded',
+            timeout: CONFIG.detailNavigationTimeoutMs,
+          });
+          const ready = await waitForDetailReady(candidatePage, 15000);
+          if (!ready) {
+            throw new Error('作品详情页加载超时，未找到可导出数据入口');
+          }
+          return candidatePage;
+        } catch (error) {
+          if (candidatePage && !candidatePage.isClosed()) {
+            await candidatePage.close().catch(() => {});
+          }
+          throw error;
+        }
+      },
+      {
+        maxAttempts: CONFIG.navigationRetryAttempts,
+        retryDelaysMs: CONFIG.navigationRetryDelaysMs,
+        shouldRetry: isRetryableDetailNavigationError,
+        onRetry: async ({ attempt, nextAttempt, delayMs, error }) => {
+          console.warn(
+            `[network] 作品详情导航第 ${attempt} 次失败，将在 ${delayMs}ms 后进行第 ${nextAttempt} 次尝试：${error.message}`,
+          );
+        },
+      },
+    );
+  } catch (error) {
+    if (isRetryableDetailNavigationError(error)) {
+      error.code = 'douyin_detail_navigation_exhausted';
+    }
+    throw error;
+  }
+}
+
 async function openDetailFromCard(listPage, card) {
   await card.scrollIntoViewIfNeeded();
 
@@ -822,10 +960,11 @@ async function exportRecentWorksFromList(context, page, limit, onProgress = asyn
   let apiTotal = 0;
   let apiReachedDateBoundary = false;
   let responseCount = 0;
+  let workListResponseSequence = 0;
+  let latestAppliedWorkListResponseSequence = 0;
+  const pendingWorkListResponses = new Set();
 
-  const parseWorkListResponse = async (response) => {
-    const url = response.url();
-    if (!url.includes('/janus/douyin/creator/pc/work_list')) return;
+  const parseWorkListResponse = async (response, sequence) => {
     const raw = await response.text();
     const safe = raw.replace(
       /"(id|aweme_id|item_id|group_id)"\s*:\s*(\d{16,})/g,
@@ -839,14 +978,17 @@ async function exportRecentWorksFromList(context, page, limit, onProgress = asyn
     }
     const parsedPage = extractDouyinWorkListPage(json);
     const items = parsedPage.items;
-    apiHasMore = parsedPage.hasMore;
-    apiNextCursor = parsedPage.nextCursor;
     apiTotal = Math.max(apiTotal, parsedPage.total);
-    const minPublishTs = parseDateValue(CONFIG.minPublishDate);
-    const cursorTs = Number.parseInt(String(apiNextCursor ?? ''), 10);
-    apiReachedDateBoundary = Boolean(
-      minPublishTs && Number.isFinite(cursorTs) && cursorTs > 100000000000 && cursorTs < minPublishTs
-    );
+    if (sequence >= latestAppliedWorkListResponseSequence) {
+      latestAppliedWorkListResponseSequence = sequence;
+      apiHasMore = parsedPage.hasMore;
+      apiNextCursor = parsedPage.nextCursor;
+      const minPublishTs = parseDateValue(CONFIG.minPublishDate);
+      const cursorTs = Number.parseInt(String(apiNextCursor ?? ''), 10);
+      apiReachedDateBoundary = Boolean(
+        minPublishTs && Number.isFinite(cursorTs) && cursorTs > 100000000000 && cursorTs < minPublishTs
+      );
+    }
     responseCount += 1;
     for (const item of items) {
       const id = String(item?.id || item?.aweme_id || item?.item_id || item?.group_id || '');
@@ -860,12 +1002,44 @@ async function exportRecentWorksFromList(context, page, limit, onProgress = asyn
     }
   };
 
-  page.on('response', (response) => {
-    parseWorkListResponse(response).catch(() => {});
-  });
+  const workListResponseListener = (response) => {
+    const url = String(response?.url?.() || '');
+    if (!url.includes('/janus/douyin/creator/pc/work_list')) return;
+    workListResponseSequence += 1;
+    const sequence = workListResponseSequence;
+    const pending = parseWorkListResponse(response, sequence)
+      .catch(() => {})
+      .finally(() => pendingWorkListResponses.delete(pending));
+    pendingWorkListResponses.add(pending);
+  };
+  const settlePendingWorkListResponses = async (timeoutMs = 15000) => {
+    if (pendingWorkListResponses.size === 0) return true;
+    let timeoutId = null;
+    const timedOut = Symbol('work_list_response_timeout');
+    const timeoutPromise = new Promise((resolve) => {
+      timeoutId = setTimeout(() => resolve(timedOut), Math.max(1, timeoutMs));
+    });
+    try {
+      const result = await Promise.race([
+        Promise.allSettled(Array.from(pendingWorkListResponses)),
+        timeoutPromise,
+      ]);
+      return result !== timedOut;
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId);
+    }
+  };
+  const responseEventTarget = typeof context?.on === 'function' ? context : page;
+  responseEventTarget.on('response', workListResponseListener);
 
-  await page.goto(CONFIG.contentManageUrl, { waitUntil: 'domcontentloaded', timeout: 60000 });
-  await page.waitForTimeout(1500);
+  try {
+  page = await navigateAuthCandidates(context, page, [CONFIG.contentManageUrl], {
+    waitUntil: 'domcontentloaded',
+    timeout: 60000,
+    settleMs: 1500,
+    sameUrlAttempts: CONFIG.navigationRetryAttempts,
+    retryDelaysMs: CONFIG.navigationRetryDelaysMs,
+  });
   const listReady = await waitForWorkListReady(page);
   if (listReady.timedOut) {
     const authClassification = await classifyDouyinAuthPage(page);
@@ -911,7 +1085,16 @@ async function exportRecentWorksFromList(context, page, limit, onProgress = asyn
           currentWorkId: '',
           currentTitle: '',
         });
-        return { mergedFiles: [], metrics: { ...metrics } };
+        return {
+          mergedFiles: [],
+          metrics: normalizeFinalMetrics({
+            totalWorks: 0,
+            processedWorks: 0,
+            successWorks: 0,
+            skippedWorks: 0,
+            failedWorks: 0,
+          }),
+        };
       }
       throw new Error('未找到作品卡片，请确认已进入作品管理页。');
     }
@@ -919,6 +1102,16 @@ async function exportRecentWorksFromList(context, page, limit, onProgress = asyn
     const eligibleCount = Array.from(workItems.values()).filter((item) =>
       meetsDateRange(item.publishDate)
     ).length;
+
+    if (pendingWorkListResponses.size > 0) {
+      const settled = await settlePendingWorkListResponses();
+      if (!settled) {
+        const error = new Error('作品列表接口响应解析超时');
+        error.code = 'work_list_response_timeout';
+        throw error;
+      }
+      continue;
+    }
 
     if (shouldStopDouyinListScan({
       eligibleCount,
@@ -941,6 +1134,18 @@ async function exportRecentWorksFromList(context, page, limit, onProgress = asyn
       scanState.staleRounds = 0;
     }
 
+    if (isDouyinPaginationStalled({
+      apiHasMore,
+      staleRounds: scanState.staleRounds,
+      stallRoundsLimit: CONFIG.paginationStallRoundsLimit,
+    })) {
+      const error = new Error(
+        `作品列表分页停滞：平台仍标记有下一页，但连续 ${scanState.staleRounds} 轮未收到新作品或游标`,
+      );
+      error.code = 'work_list_pagination_stalled';
+      throw error;
+    }
+
     if (scanState.staleRounds >= CONFIG.staleRoundsLimit && apiHasMore !== true) {
       console.log('[list] 平台已无更多作品，停止扫描。');
       break;
@@ -959,6 +1164,15 @@ async function exportRecentWorksFromList(context, page, limit, onProgress = asyn
       currentWorkId: '',
       currentTitle: '',
     });
+  }
+
+  } finally {
+    if (typeof responseEventTarget.off === 'function') {
+      responseEventTarget.off('response', workListResponseListener);
+    }
+    if (pendingWorkListResponses.size > 0) {
+      await settlePendingWorkListResponses();
+    }
   }
 
   let candidates = Array.from(workItems.values()).filter((item) => meetsDateRange(item.publishDate));
@@ -996,6 +1210,7 @@ async function exportRecentWorksFromList(context, page, limit, onProgress = asyn
     })
   );
 
+  let consecutiveNavigationFailures = 0;
   for (let index = 0; index < candidates.length; index += 1) {
     const meta = candidates[index];
     const metaId = meta?.id ? String(meta.id) : '';
@@ -1032,13 +1247,16 @@ async function exportRecentWorksFromList(context, page, limit, onProgress = asyn
           currentTitle: meta?.title || '',
         })
       );
+      consecutiveNavigationFailures = 0;
+      if (CONFIG.workIntervalMs > 0) await page.waitForTimeout(CONFIG.workIntervalMs);
       continue;
     }
 
     let detailPage = null;
+    let stopAfterCurrent = false;
+    let failureCooldownMs = 0;
     try {
-      detailPage = await context.newPage();
-      await detailPage.goto(buildDetailUrl(metaId), { waitUntil: 'domcontentloaded' });
+      detailPage = await openDetailPageWithRetry(context, buildDetailUrl(metaId));
       const result = await exportWorkFromDetailPage(detailPage, index + 1, meta);
 
       if (result.skip) {
@@ -1057,6 +1275,7 @@ async function exportRecentWorksFromList(context, page, limit, onProgress = asyn
             currentTitle: meta?.title || '',
           })
         );
+        consecutiveNavigationFailures = 0;
         continue;
       }
 
@@ -1079,6 +1298,7 @@ async function exportRecentWorksFromList(context, page, limit, onProgress = asyn
             currentTitle: meta?.title || '',
           })
         );
+        consecutiveNavigationFailures = 0;
         continue;
       }
 
@@ -1125,6 +1345,7 @@ async function exportRecentWorksFromList(context, page, limit, onProgress = asyn
             currentTitle: meta?.title || '',
           })
         );
+        consecutiveNavigationFailures = 0;
       } else {
         metrics.processedWorks += 1;
         metrics.skippedWorks += 1;
@@ -1137,6 +1358,7 @@ async function exportRecentWorksFromList(context, page, limit, onProgress = asyn
             currentTitle: meta?.title || '',
           })
         );
+        consecutiveNavigationFailures = 0;
       }
     } catch (error) {
       console.error(`[work] 第 ${index + 1} 条打开失败：${error.message}`);
@@ -1150,6 +1372,10 @@ async function exportRecentWorksFromList(context, page, limit, onProgress = asyn
       }
       metrics.processedWorks += 1;
       metrics.failedWorks += 1;
+      const transientNavigationFailure = isDouyinDetailNavigationExhausted(error);
+      consecutiveNavigationFailures = transientNavigationFailure
+        ? consecutiveNavigationFailures + 1
+        : 0;
       await onProgress(
         progressPatch({
           phase: 'exporting',
@@ -1159,6 +1385,24 @@ async function exportRecentWorksFromList(context, page, limit, onProgress = asyn
           currentTitle: meta?.title || '',
         })
       );
+      if (
+        transientNavigationFailure
+        && consecutiveNavigationFailures >= CONFIG.maxConsecutiveNavigationFailures
+      ) {
+        const remainingWorks = Math.max(candidates.length - (index + 1), 0);
+        stopAfterCurrent = true;
+        await onProgress(
+          progressPatch({
+            phase: 'exporting',
+            message: `连续网络异常，已暂停剩余 ${remainingWorks} 条并保留 ${metrics.successWorks} 条成功结果`,
+            currentIndex: index + 1,
+            currentWorkId: '',
+            currentTitle: '',
+          })
+        );
+      } else if (transientNavigationFailure) {
+        failureCooldownMs = CONFIG.navigationFailureCooldownMs;
+      }
     } finally {
       if (detailPage) {
         try {
@@ -1167,14 +1411,20 @@ async function exportRecentWorksFromList(context, page, limit, onProgress = asyn
           // ignore
         }
       }
+      const intervalMs = failureCooldownMs > 0 ? failureCooldownMs : CONFIG.workIntervalMs;
+      if (!stopAfterCurrent && intervalMs > 0) {
+        console.log(`[network] 下一条作品前等待 ${intervalMs}ms。`);
+        await page.waitForTimeout(intervalMs);
+      }
     }
+    if (stopAfterCurrent) break;
   }
 
   await onProgress(
     progressPatch({
       phase: 'merging',
-      message: '作品导出完成，准备合并总表',
-      currentIndex: metrics.totalWorks,
+      message: '作品处理结束，准备整理结果',
+      currentIndex: metrics.processedWorks,
       currentWorkId: '',
       currentTitle: '',
     })
@@ -1218,7 +1468,11 @@ async function main() {
       message: '正在检查登录状态',
     });
 
-    page = await navigateAuthCandidates(context, page, [CONFIG.contentManageUrl], { settleMs: 1500 });
+    page = await navigateAuthCandidates(context, page, [CONFIG.contentManageUrl], {
+      settleMs: 1500,
+      sameUrlAttempts: CONFIG.navigationRetryAttempts,
+      retryDelaysMs: CONFIG.navigationRetryDelaysMs,
+    });
     let authClassification = await classifyDouyinAuthPage(page);
     if (authClassification !== 'authorized') {
       await updateProgress({
@@ -1271,18 +1525,19 @@ async function main() {
     const exportResult = await exportRecentWorksFromList(context, page, CONFIG.videoLimit, updateProgress);
     const mergedFiles = Array.isArray(exportResult?.mergedFiles) ? exportResult.mergedFiles : [];
     const metrics = exportResult?.metrics || {};
-    assertExportOutcome(metrics);
+    const outcome = classifyExportOutcome(metrics);
     const allMergedFiles = await listAllMergedFiles();
-    if (allMergedFiles.length > 0) {
+    if (allMergedFiles.length > 0 && (outcome === 'success' || normalizeFinalMetrics(metrics).successWorks > 0)) {
       await updateProgress({
         phase: 'merging',
-        message: '正在合并总表',
+        message: outcome === 'partial_failure' ? '正在保留已成功作品结果' : '正在合并总表',
         ...normalizeFinalMetrics(metrics),
         currentWorkId: '',
         currentTitle: '',
       });
       await mergeAllVideos();
     }
+    assertExportOutcome(metrics);
 
     console.log('\n[done] 抖音任务完成。');
     const completionPatch = buildFinalCompletionPatch(metrics, allMergedFiles.length || mergedFiles.length || 0);

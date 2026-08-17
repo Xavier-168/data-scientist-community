@@ -45,12 +45,15 @@
 
 上游官方仓库显示下列字体使用 SIL Open Font License 1.1，可在满足版权声明、许可证和 Reserved Font Name 条件时再分发：
 
+- Noto Serif SC：<https://github.com/google/fonts/tree/main/ofl/notoserifsc>
 - Source Han Sans：<https://github.com/adobe-fonts/source-han-sans/blob/master/LICENSE.txt>
 - LXGW WenKai：<https://github.com/lxgw/LxgwWenKai/blob/main/OFL.txt>
 - Sarasa Gothic：<https://github.com/be5invis/Sarasa-Gothic/blob/main/LICENSE>
 - Geist：<https://github.com/vercel/geist-font/blob/main/OFL.txt>
 
-但是原工作区中的本地二进制没有下载记录或随附许可证，不能证明与某个上游 release 一一对应。因此全部字体均从社区候选排除，CSS 改用系统字体 fallback。下表仅保留审计证据，不表示这些文件已获准发布。
+本轮为匹配 Figma 28:3 画板，从 Google Fonts 官方仓库直接取得 `NotoSerifSC[wght].ttf`，以 `frontend/assets/fonts/NotoSerifSC-Variable.ttf` 随源码分发，并随附原始 `OFL.txt`。该文件 SHA-256 为 `050080d9255a86808f2945bffac582b31ef32bc36411ce29563b4961670c66f9`，许可证文件 SHA-256 为 `5e0da210fb04058a8c0087985d2d456b931c2579811a49655721d3cf0c36b6d6`。
+
+其余原工作区本地字体二进制没有下载记录或随附许可证，不能证明与某个上游 release 一一对应，因此仍从社区候选排除，基础主题继续使用系统字体 fallback。下表仅保留这些被排除文件的审计证据，不表示它们已获准发布。
 
 | 原本地文件 | 内嵌家族/版本 | SHA-256 | 候选处理 |
 |---|---|---|---|
@@ -68,7 +71,9 @@
 
 ## 4. 图标
 
-原工作区中没有可验证权属记录的图标未进入候选仓库。采集进度卡仅新增有明确 MIT 授权且已随附许可证的 Tabler `walk.svg`。应用图标只包含本次为社区候选生成的无文字、无平台标识原创占位图标：PNG SHA-256 为 `502089826929f27186035466480d0d00ad5552b6274765778b51168935b7690e`，由同一 PNG 机械生成的 macOS ICNS SHA-256 为 `37a2896d1dff2735f5388b63f5273a24879169d0a9387c732c4cf34921d51ff4`。两者随本仓库按 AGPL-3.0-only 提供，不代表任何第三方商标。
+原工作区中没有可验证权属记录的应用图标未进入候选仓库。采集进度卡新增有明确 MIT 授权且已随附许可证的 Tabler `walk.svg`。应用图标只包含本次为社区候选生成的无文字、无平台标识原创占位图标：PNG SHA-256 为 `502089826929f27186035466480d0d00ad5552b6274765778b51168935b7690e`，由同一 PNG 机械生成的 macOS ICNS SHA-256 为 `37a2896d1dff2735f5388b63f5273a24879169d0a9387c732c4cf34921d51ff4`。产品信箱 `frontend/assets/figma/mailbox.svg` 是本项目 UI 插图，随仓库许可提供。
+
+`frontend/assets/platforms/douyin.svg`、`bilibili.svg`、`kuaishou.svg` 是用于表格中识别数据来源的单色平台标识。相关名称、图形和商标权利归各自权利人；仓库中的兼容性说明和来源标签不构成官方合作、授权、认证或背书，也不授予超出合理来源识别范围的商标使用权。衍生发行版应结合适用法和平台品牌规范自行评估并替换这些标识。
 
 ## 5. AGPL 兼容性结论
 

@@ -60,7 +60,14 @@
     "desktop/src/test/setup.ts",
     "desktop/tsconfig.json",
     "desktop/vite.config.ts",
+    "frontend/assets/figma/mailbox.svg",
+    "frontend/assets/fonts/NotoSerifSC-OFL.txt",
+    "frontend/assets/fonts/NotoSerifSC-Variable.ttf",
+    "frontend/assets/platforms/bilibili.svg",
+    "frontend/assets/platforms/douyin.svg",
+    "frontend/assets/platforms/kuaishou.svg",
     "frontend/assets/progress-apple-theme.css",
+    "frontend/assets/progress-figma-dashboard.css",
     "frontend/assets/vendor/tabler/LICENSE",
     "frontend/assets/vendor/tabler/walk.svg",
     "frontend/loading.html",
@@ -132,8 +139,11 @@
     "scripts/test_collection_scheduler.py",
     "scripts/test_douyin_result_reuse.js",
     "scripts/test_episode_grouping_and_feishu_cli.py",
+    "scripts/test_excel_export_dialog.py",
+    "scripts/test_excel_export_flow.js",
     "scripts/test_feedback_privacy.py",
     "scripts/test_feishu_sync_cli.py",
+    "scripts/test_figma_fullscreen_layout.js",
     "scripts/test_frontend_request_recovery.js",
     "scripts/test_frontend_security.js",
     "scripts/test_kuaishou_export_download.mjs",
@@ -199,6 +209,7 @@
     "docs/DATA_FLOW.md",
     "docs/GITHUB_LISTING.md",
     "docs/RELEASE_NOTES_v0.1.0.md",
+    "docs/RELEASE_NOTES_v0.1.0-rc.2.md",
     "package.json",
     "requirements.txt"
   ],
@@ -242,7 +253,19 @@
     "打开数据中心.command",
     "项目说明_最新.md"
   ],
+  "denylist_exceptions": [
+    "frontend/assets/fonts/NotoSerifSC-Variable.ttf",
+    "frontend/assets/fonts/NotoSerifSC-OFL.txt"
+  ],
   "approved_binary_assets": [
+    {
+      "source": "frontend/assets/fonts/NotoSerifSC-Variable.ttf",
+      "destination": "frontend/assets/fonts/NotoSerifSC-Variable.ttf",
+      "media_type": "font/ttf",
+      "sha256": "050080d9255a86808f2945bffac582b31ef32bc36411ce29563b4961670c66f9",
+      "provenance": "Google Fonts official repository, ofl/notoserifsc/NotoSerifSC[wght].ttf",
+      "license": "OFL-1.1"
+    },
     {
       "source": "public/assets/community-icon-source.png",
       "destination": "desktop/src-tauri/icons/community-icon.png",
@@ -348,7 +371,7 @@
   "deterministic_overrides": [
     "Remove all production license, update, and feedback defaults",
     "Enable local community access only when COMMUNITY_EDITION marker is present",
-    "Replace bundled font declarations with system font fallbacks",
+    "Exclude unverified bundled fonts; allow only the pinned Google Fonts Noto Serif SC asset and keep system fallbacks elsewhere",
     "Replace original Tauri identity and icons with community values",
     "Redact private service domains and developer absolute paths",
     "Refuse export when a required source or transform anchor changes"

@@ -147,16 +147,20 @@ class PublicReleaseContractTests(unittest.TestCase):
         self.assertEqual(records[0]["licenseDeclared"], "MIT OR Apache-2.0")
         self.assertIn("metadata", run.call_args.args[0])
 
-    def test_fonts_use_system_fallback_and_font_binaries_are_absent(self):
+    def test_only_verified_figma_font_is_distributed(self):
         css = (ROOT / "frontend/assets/progress-apple-theme.css").read_text(encoding="utf-8")
         self.assertNotIn("@font-face", css)
         self.assertNotRegex(css, re.compile(r"fonts/.*\.(?:otf|ttf|woff2?)", re.I))
+        figma_css = (ROOT / "frontend/assets/progress-figma-dashboard.css").read_text(encoding="utf-8")
+        self.assertIn('@font-face', figma_css)
+        self.assertIn('fonts/NotoSerifSC-Variable.ttf', figma_css)
         font_files = [
             path.relative_to(ROOT).as_posix()
             for path in (ROOT / "frontend").rglob("*")
             if path.suffix.lower() in {".otf", ".ttf", ".woff", ".woff2"}
         ]
-        self.assertEqual(font_files, [])
+        self.assertEqual(font_files, ["frontend/assets/fonts/NotoSerifSC-Variable.ttf"])
+        self.assertTrue((ROOT / "frontend/assets/fonts/NotoSerifSC-OFL.txt").is_file())
 
     def test_original_community_icons_cover_source_and_macos_bundle(self):
         for name in ("community-icon.png", "community-icon.icns"):
@@ -247,6 +251,38 @@ class PublicReleaseContractTests(unittest.TestCase):
             )
             payload = json.loads(report.read_text(encoding="utf-8"))
             self.assertEqual(payload["counts"], {"critical": 0, "high": 0, "medium": 0, "low": 0})
+
+    def test_history_scan_allows_only_the_exact_approved_large_binary(self):
+        module_path = ROOT / "scripts" / "public_audit_scan.py"
+        spec = importlib.util.spec_from_file_location("community_public_audit_scan", module_path)
+        module = importlib.util.module_from_spec(spec)
+        assert spec and spec.loader
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+
+        path = "frontend/assets/fonts/NotoSerifSC-Variable.ttf"
+        raw = b"\x00" + (b"approved-font-fixture" * 120_000)
+        digest = __import__("hashlib").sha256(raw).hexdigest()
+
+        def fake_run(command, **kwargs):
+            if command[:3] == ["git", "cat-file", "blob"]:
+                return subprocess.CompletedProcess(command, 0, stdout=raw)
+            if command[:2] == ["git", "log"]:
+                return subprocess.CompletedProcess(command, 0, stdout="")
+            self.fail(f"unexpected git command: {command}")
+
+        with (
+            patch.object(
+                module,
+                "_git_blob_records",
+                side_effect=lambda _repo: iter([("a" * 40, len(raw), path)]),
+            ),
+            patch.object(module.subprocess, "run", side_effect=fake_run),
+        ):
+            self.assertEqual(module.scan_git_history(ROOT, [], {path: digest}), [])
+            findings = module.scan_git_history(ROOT, [], {path: "0" * 64})
+
+        self.assertEqual([item.rule for item in findings], ["history_large_blob"])
 
 
 if __name__ == "__main__":

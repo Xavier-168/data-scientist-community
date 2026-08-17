@@ -677,6 +677,201 @@ class RunnerArtifactIntegrationTests(unittest.TestCase):
             self.assertEqual(official_xlsx.read_bytes(), b"fresh-xlsx")
             self.assertEqual(official_rows.read_text(encoding="utf-8"), "[]")
 
+    def test_douyin_partial_failure_promotes_valid_staged_artifacts_without_retry(self):
+        handler = runner.Handler.__new__(runner.Handler)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            script = root / "run_douyin.sh"
+            script.write_text("#!/bin/bash\n", encoding="utf-8")
+            progress = root / "douyin_progress.json"
+            official_xlsx = root / "all_videos.xlsx"
+
+            def fake_platform_run(_command, env, **_kwargs):
+                pathlib.Path(env["MASTER_PATH"]).write_bytes(b"fresh-partial-xlsx")
+                pathlib.Path(env["SUMMARY_PATH"]).write_text(
+                    "work_id,title,publish_date,merged_file,raw_files\n1,title,2026-08-17,merged-1.xlsx,\n",
+                    encoding="utf-8",
+                )
+                pathlib.Path(env["STATE_PATH"]).write_text(
+                    json.dumps({"processed_ids": ["1"]}),
+                    encoding="utf-8",
+                )
+                pathlib.Path(env["DOWNLOAD_DIR"], "merged-1.xlsx").write_bytes(b"fresh-work")
+                progress.write_text(
+                    json.dumps(
+                        {
+                            "status": "failed",
+                            "phase": "failed",
+                            "error": "partial_failure",
+                            "totalWorks": 28,
+                            "processedWorks": 23,
+                            "queuedWorks": 5,
+                            "successWorks": 21,
+                            "failedWorks": 2,
+                            "finishedAt": "2026-08-17T18:20:00+0800",
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                return SupervisedResult(1, "failed", "", "partial_failure", 0.1)
+
+            handler._build_env = lambda *_args, **_kwargs: {}
+            handler._run_platform_script = fake_platform_run
+            handler._get_proc_output = lambda proc: (proc.stdout_text, proc.stderr_text)
+            handler._append_log = lambda *_args: None
+
+            with (
+                patch.object(runner, "DOWNLOADS_DIR", temp_dir),
+                patch.object(runner, "DATA_FILE", str(official_xlsx)),
+                patch.object(runner, "_preflight_platform_run", return_value={"blocked": False}),
+                patch.object(runner, "_prime_platform_progress"),
+                patch.object(runner, "_finalize_platform_progress"),
+                patch.object(runner, "_sync_platform_auth_state_from_progress"),
+            ):
+                result = handler._execute_run_all_platform_step(
+                    ("douyin", str(script), str(progress), False),
+                    {},
+                    "run-partial",
+                )
+
+            self.assertEqual(result.outcome, "partial_failure")
+            self.assertTrue(result.fresh_output)
+            self.assertFalse(result.retryable)
+            self.assertEqual(result.returncode, 1)
+            self.assertEqual(official_xlsx.read_bytes(), b"fresh-partial-xlsx")
+            self.assertTrue((root / "merged-1.xlsx").is_file())
+            self.assertEqual(
+                json.loads((root / "processed_ids.json").read_text(encoding="utf-8")),
+                {"processed_ids": ["1"]},
+            )
+
+    def test_douyin_zero_success_failure_does_not_promote_and_remains_retryable(self):
+        handler = runner.Handler.__new__(runner.Handler)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            script = root / "run_douyin.sh"
+            script.write_text("#!/bin/bash\n", encoding="utf-8")
+            progress = root / "douyin_progress.json"
+            official_xlsx = root / "all_videos.xlsx"
+            official_xlsx.write_bytes(b"previous-xlsx")
+
+            def fake_platform_run(_command, env, **_kwargs):
+                pathlib.Path(env["MASTER_PATH"]).write_bytes(b"invalid-zero-success-candidate")
+                pathlib.Path(env["SUMMARY_PATH"]).write_text(
+                    "work_id,title,publish_date,merged_file,raw_files\n",
+                    encoding="utf-8",
+                )
+                pathlib.Path(env["STATE_PATH"]).write_text(
+                    json.dumps({"processed_ids": []}),
+                    encoding="utf-8",
+                )
+                progress.write_text(
+                    json.dumps(
+                        {
+                            "status": "failed",
+                            "phase": "failed",
+                            "error": "partial_failure",
+                            "totalWorks": 3,
+                            "processedWorks": 3,
+                            "queuedWorks": 0,
+                            "successWorks": 0,
+                            "failedWorks": 3,
+                            "finishedAt": "2026-08-17T18:20:00+0800",
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                return SupervisedResult(1, "failed", "", "all_candidates_failed", 0.1)
+
+            handler._build_env = lambda *_args, **_kwargs: {}
+            handler._run_platform_script = fake_platform_run
+            handler._get_proc_output = lambda proc: (proc.stdout_text, proc.stderr_text)
+            handler._append_log = lambda *_args: None
+
+            with (
+                patch.object(runner, "DOWNLOADS_DIR", temp_dir),
+                patch.object(runner, "DATA_FILE", str(official_xlsx)),
+                patch.object(runner, "_preflight_platform_run", return_value={"blocked": False}),
+                patch.object(runner, "_prime_platform_progress"),
+                patch.object(runner, "_finalize_platform_progress"),
+                patch.object(runner, "_sync_platform_auth_state_from_progress"),
+            ):
+                result = handler._execute_run_all_platform_step(
+                    ("douyin", str(script), str(progress), False),
+                    {},
+                    "run-zero-success",
+                )
+
+            self.assertEqual(result.outcome, "failed")
+            self.assertFalse(result.fresh_output)
+            self.assertTrue(result.retryable)
+            self.assertEqual(official_xlsx.read_bytes(), b"previous-xlsx")
+
+    def test_douyin_partial_promotion_error_preserves_partial_result_without_retry(self):
+        handler = runner.Handler.__new__(runner.Handler)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = pathlib.Path(temp_dir)
+            script = root / "run_douyin.sh"
+            script.write_text("#!/bin/bash\n", encoding="utf-8")
+            progress = root / "douyin_progress.json"
+            official_xlsx = root / "all_videos.xlsx"
+            official_xlsx.write_bytes(b"previous-xlsx")
+
+            partial_progress = {
+                "status": "failed",
+                "phase": "failed",
+                "message": "成功 4 条，仍有 2 条待重试",
+                "error": "partial_failure",
+                "totalWorks": 8,
+                "processedWorks": 6,
+                "queuedWorks": 2,
+                "successWorks": 4,
+                "failedWorks": 2,
+                "finishedAt": "2026-08-17T18:20:00+0800",
+            }
+
+            def fake_platform_run(_command, env, **_kwargs):
+                # Intentionally omit MASTER_PATH so promotion validation fails.
+                pathlib.Path(env["SUMMARY_PATH"]).write_text(
+                    "work_id,title,publish_date,merged_file,raw_files\n",
+                    encoding="utf-8",
+                )
+                pathlib.Path(env["STATE_PATH"]).write_text(
+                    json.dumps({"processed_ids": ["1", "2", "3", "4"]}),
+                    encoding="utf-8",
+                )
+                progress.write_text(json.dumps(partial_progress), encoding="utf-8")
+                return SupervisedResult(1, "failed", "", "partial_failure", 0.1)
+
+            handler._build_env = lambda *_args, **_kwargs: {}
+            handler._run_platform_script = fake_platform_run
+            handler._get_proc_output = lambda proc: (proc.stdout_text, proc.stderr_text)
+            handler._append_log = lambda *_args: None
+
+            with (
+                patch.object(runner, "DOWNLOADS_DIR", temp_dir),
+                patch.object(runner, "DATA_FILE", str(official_xlsx)),
+                patch.object(runner, "_preflight_platform_run", return_value={"blocked": False}),
+                patch.object(runner, "_prime_platform_progress"),
+                patch.object(runner, "_sync_platform_auth_state_from_progress"),
+            ):
+                result = handler._execute_run_all_platform_step(
+                    ("douyin", str(script), str(progress), False),
+                    {},
+                    "run-partial-invalid",
+                )
+
+            persisted = json.loads(progress.read_text(encoding="utf-8"))
+            self.assertEqual(result.outcome, "partial_failure")
+            self.assertFalse(result.fresh_output)
+            self.assertFalse(result.retryable)
+            self.assertIn("partial_artifact_promotion_failed", result.error_message)
+            self.assertIn("missing_artifact:douyin:all_videos.xlsx", result.error_message)
+            self.assertEqual(persisted["successWorks"], 4)
+            self.assertEqual(persisted["queuedWorks"], 2)
+            self.assertEqual(persisted["error"], "partial_failure")
+            self.assertEqual(official_xlsx.read_bytes(), b"previous-xlsx")
+
     def test_empty_success_publishes_empty_artifact_and_reports_completed_empty(self):
         handler = runner.Handler.__new__(runner.Handler)
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -871,6 +1066,66 @@ class RunnerRunAllSafetyTests(unittest.TestCase):
         handler._run_feishu_sync.assert_not_called()
         self.assertFalse(payload["merge_ok"])
         self.assertEqual(payload["status"], "partial_failed")
+        self.assertFalse(payload["feishu_sync_attempted"])
+        self.assertIn("未全部成功", payload["feishu"]["summary"])
+
+    def test_fresh_douyin_partial_output_still_blocks_global_merge_and_feishu(self):
+        handler = runner.Handler.__new__(runner.Handler)
+        handler._append_log = lambda *_args: None
+        handler._run_script = MagicMock()
+        handler._get_proc_output = lambda _proc: ("", "")
+        handler._run_feishu_sync = MagicMock()
+        steps = [("douyin", "/tmp/douyin.sh", "/tmp/douyin.json", False)]
+        scheduled = {
+            "douyin": PlatformResult(
+                "douyin",
+                "partial_failure",
+                retryable=False,
+                returncode=1,
+                fresh_output=True,
+                started=True,
+            ),
+        }
+        snapshot = {
+            "platforms": [
+                {
+                    "platform": "douyin",
+                    "label": "抖音",
+                    "ui_status": "failed",
+                    "status": "failed",
+                    "auth_status": "authorized",
+                    "total_works": 28,
+                    "success_works": 21,
+                    "failed_works": 2,
+                }
+            ]
+        }
+        config = {
+            "min_publish_date": "2026-01-01",
+            "feishu_enabled": True,
+            "feishu_auto_sync": True,
+        }
+
+        with (
+            patch.object(runner, "load_saved_config", return_value=config),
+            patch.object(runner, "feishu_config_ready", return_value=True),
+            patch.object(handler, "_run_all_platform_steps", return_value=steps),
+            patch.object(handler, "_run_platform_steps_bounded", return_value=scheduled),
+            patch.object(runner, "_platform_history_snapshot", return_value=snapshot),
+            patch.object(runner, "_append_run_history_entry"),
+        ):
+            payload = handler._execute_run_all(
+                {},
+                start=time.time(),
+                started_at="2026-08-17 18:00:00",
+                run_id="run-partial",
+            )
+
+        handler._run_script.assert_not_called()
+        handler._run_feishu_sync.assert_not_called()
+        self.assertFalse(payload["douyin_ok"])
+        self.assertFalse(payload["merge_ok"])
+        self.assertEqual(payload["status"], "failed")
         self.assertFalse(payload["feishu_sync_attempted"])
         self.assertIn("未全部成功", payload["feishu"]["summary"])
 
@@ -1095,6 +1350,17 @@ class FeishuRuntimeTests(unittest.TestCase):
             )
 
         self.assertEqual(decorated["ui_status"], "authorizing")
+
+    def test_collector_runtime_preflight_requires_local_playwright_package(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            self.assertEqual(
+                runner._collector_runtime_preflight_error(temp_dir),
+                "playwright_not_installed",
+            )
+            package = pathlib.Path(temp_dir) / "node_modules" / "playwright" / "package.json"
+            package.parent.mkdir(parents=True)
+            package.write_text('{"name":"playwright"}', encoding="utf-8")
+            self.assertEqual(runner._collector_runtime_preflight_error(temp_dir), "")
 
     def test_auto_sync_targets_include_completed_empty_for_incremental_updates(self):
         targets = runner._feishu_sync_target_platforms(
@@ -2271,6 +2537,68 @@ class AuthRecoveryTests(unittest.TestCase):
             self.assertEqual(progress["auth_status"], "unauthorized")
             self.assertEqual(progress["auth_reason"], "not_authorized")
             self.assertEqual([item[0] for item in call_sequence], ["ui"])
+
+
+class FeishuVerificationUrlOpenTests(unittest.TestCase):
+    def test_trusted_feishu_cli_url_opens_with_macos_open(self):
+        url = "https://open.feishu.cn/page/cli?user_code=TEST-CODE"
+        with (
+            patch.object(runner.sys, "platform", "darwin"),
+            patch.object(runner.subprocess, "Popen") as popen_mock,
+        ):
+            self.assertTrue(runner._open_trusted_feishu_verification_url(url))
+        popen_mock.assert_called_once()
+        self.assertEqual(popen_mock.call_args.args[0], ["/usr/bin/open", url])
+        self.assertTrue(popen_mock.call_args.kwargs["start_new_session"])
+
+    def test_untrusted_or_non_https_feishu_url_is_never_opened(self):
+        urls = [
+            "http://open.feishu.cn/page/cli?user_code=TEST",
+            "https://open.feishu.cn.evil.example/page/cli?user_code=TEST",
+            "https://open.feishu.cn/other/path",
+            "javascript:alert(1)",
+        ]
+        with (
+            patch.object(runner.sys, "platform", "darwin"),
+            patch.object(runner.subprocess, "Popen") as popen_mock,
+        ):
+            self.assertTrue(all(not runner._open_trusted_feishu_verification_url(url) for url in urls))
+        popen_mock.assert_not_called()
+
+    def test_both_feishu_onboarding_authorization_stages_auto_open(self):
+        helper_name = "_open_trusted_feishu_verification_url"
+        self.assertIn(helper_name, runner._run_lark_cli_user_auth_flow.__code__.co_names)
+        connect_names = set(runner._lark_cli_connect_worker.__code__.co_names)
+        for constant in runner._lark_cli_connect_worker.__code__.co_consts:
+            if hasattr(constant, "co_names"):
+                connect_names.update(constant.co_names)
+        self.assertIn(helper_name, connect_names)
+
+
+    def test_lark_cli_output_deadline_terminates_silent_child(self):
+        proc = runner.subprocess.Popen(
+            [runner.sys.executable, "-c", "import time; time.sleep(5)"],
+            stdout=runner.subprocess.PIPE,
+            stderr=runner.subprocess.STDOUT,
+            text=True,
+        )
+        started = time.monotonic()
+        with self.assertRaises(runner.subprocess.TimeoutExpired):
+            runner._consume_lark_cli_output(proc, lambda _line: None, timeout_seconds=0.1)
+        self.assertLess(time.monotonic() - started, 2.0)
+        self.assertIsNotNone(proc.poll())
+
+    def test_lark_cli_output_stream_delivers_lines_before_exit(self):
+        proc = runner.subprocess.Popen(
+            [runner.sys.executable, "-c", "print('first', flush=True); print('second', flush=True)"],
+            stdout=runner.subprocess.PIPE,
+            stderr=runner.subprocess.STDOUT,
+            text=True,
+        )
+        lines = []
+        runner._consume_lark_cli_output(proc, lines.append, timeout_seconds=2)
+        self.assertEqual([line.strip() for line in lines], ["first", "second"])
+        self.assertEqual(proc.returncode, 0)
 
 
 if __name__ == "__main__":

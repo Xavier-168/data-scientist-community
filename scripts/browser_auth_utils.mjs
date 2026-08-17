@@ -15,6 +15,21 @@ export function isPlaceholderBrowserUrl(value) {
   );
 }
 
+export function isTransientNavigationError(error) {
+  const message = String(error instanceof Error ? error.message : error || '');
+  return /(?:Timeout \d+ms exceeded|ERR_(?:CONNECTION_CLOSED|CONNECTION_RESET|CONNECTION_ABORTED|TIMED_OUT|NETWORK_CHANGED|INTERNET_DISCONNECTED|PROXY_CONNECTION_FAILED)|Navigation failed because page was closed|Target page, context or browser has been closed)/iu.test(message);
+}
+
+function normalizedRetryDelays(value) {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => Math.max(0, Number(item) || 0));
+}
+
+async function defaultSleep(milliseconds) {
+  if (milliseconds <= 0) return;
+  await new Promise((resolve) => setTimeout(resolve, milliseconds));
+}
+
 function escapeAppleScriptText(value) {
   return String(value ?? '').replace(/\\/g, '\\\\').replace(/"/g, '\\"');
 }
@@ -107,24 +122,47 @@ export async function navigateAuthCandidates(context, page, candidates, options 
   const waitUntil = options.waitUntil || 'domcontentloaded';
   const timeout = Number.isFinite(options.timeout) ? options.timeout : 60000;
   const settleMs = Number.isFinite(options.settleMs) ? options.settleMs : 1200;
+  const sameUrlAttempts = Math.max(1, Number.parseInt(options.sameUrlAttempts ?? '1', 10) || 1);
+  const retryDelaysMs = normalizedRetryDelays(options.retryDelaysMs);
+  const sleep = typeof options.sleep === 'function' ? options.sleep : defaultSleep;
+  const shouldRetry = typeof options.shouldRetry === 'function'
+    ? options.shouldRetry
+    : isTransientNavigationError;
   const errors = [];
 
   let activePage = await prepareAuthPage(context, page, options);
 
   for (let index = 0; index < urls.length; index += 1) {
     const targetUrl = urls[index];
-    try {
-      await activePage.goto(targetUrl, { waitUntil, timeout });
-      if (settleMs > 0 && typeof activePage.waitForTimeout === 'function') {
-        await activePage.waitForTimeout(settleMs);
+    for (let attempt = 1; attempt <= sameUrlAttempts; attempt += 1) {
+      let attemptError = null;
+      try {
+        await activePage.goto(targetUrl, { waitUntil, timeout });
+        if (settleMs > 0 && typeof activePage.waitForTimeout === 'function') {
+          await activePage.waitForTimeout(settleMs);
+        }
+        await safeBringToFront(activePage, options);
+        if (!isPlaceholderBrowserUrl(activePage.url?.())) {
+          return activePage;
+        }
+        attemptError = new Error(
+          `${targetUrl}: stayed on ${String(activePage.url?.() || 'about:blank')}`,
+        );
+      } catch (error) {
+        attemptError = error instanceof Error ? error : new Error(String(error));
       }
+
+      errors.push(
+        `${targetUrl} [attempt ${attempt}/${sameUrlAttempts}]: ${attemptError.message}`,
+      );
+      const retrySameUrl = attempt < sameUrlAttempts && shouldRetry(attemptError);
+      if (!retrySameUrl) break;
+
+      await safeClose(activePage);
+      const delayMs = retryDelaysMs[Math.min(attempt - 1, Math.max(retryDelaysMs.length - 1, 0))] || 0;
+      await sleep(delayMs);
+      activePage = await context.newPage();
       await safeBringToFront(activePage, options);
-      if (!isPlaceholderBrowserUrl(activePage.url?.())) {
-        return activePage;
-      }
-      errors.push(`${targetUrl}: stayed on ${String(activePage.url?.() || 'about:blank')}`);
-    } catch (error) {
-      errors.push(`${targetUrl}: ${error instanceof Error ? error.message : String(error)}`);
     }
 
     if (index < urls.length - 1) {

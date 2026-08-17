@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
+import time
 from typing import Callable, Iterable
 
 
@@ -34,6 +35,8 @@ def run_bounded(
     run_one: Callable[[str], PlatformResult],
     *,
     max_workers: int = 2,
+    retry_delays: dict[str, float] | None = None,
+    sleep_fn: Callable[[float], None] = time.sleep,
 ) -> dict[str, PlatformResult]:
     ordered = list(platforms)
     if not ordered:
@@ -55,6 +58,9 @@ def run_bounded(
         first = results[platform]
         if first.outcome == "success" or not first.retryable:
             continue
+        retry_delay = max(float((retry_delays or {}).get(platform, 0.0) or 0.0), 0.0)
+        if retry_delay > 0:
+            sleep_fn(retry_delay)
         try:
             retried = run_one(platform)
             results[platform] = replace(retried, attempts=2, retryable=False)
