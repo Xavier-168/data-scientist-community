@@ -573,8 +573,11 @@
     const scale = Math.min(viewportWidth / DASHBOARD_DESIGN_WIDTH, viewportHeight / DASHBOARD_DESIGN_HEIGHT);
     const visualWidth = DASHBOARD_DESIGN_WIDTH * scale;
     const visualHeight = DASHBOARD_DESIGN_HEIGHT * scale;
-    const offsetX = Math.max(0, (viewportWidth - visualWidth) / 2);
-    const offsetY = Math.max(0, (viewportHeight - visualHeight) / 2);
+    // 左上角锚定：缩放已保证画布不超出视口，宽度/高度方向的余量统一留在
+    // 右侧/底部并与阶段背景（侧栏灰、工作区白）自然融合，避免左侧和顶部
+    // 出现信箱式空白条。
+    const offsetX = 0;
+    const offsetY = 0;
     const sidebarEdge = offsetX + (SIDEBAR_DEFAULT_WIDTH * scale);
     app.style.setProperty('--dashboard-scale', String(scale));
     app.style.width = `${DASHBOARD_DESIGN_WIDTH}px`;
