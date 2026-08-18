@@ -89,8 +89,8 @@ async fn open_legacy_console(
     ))
     .map_err(|error| format!("legacy_url_invalid:{error}"))?;
     let mut console_builder = WebviewWindowBuilder::new(&app, "legacy", WebviewUrl::External(url))
-        .title("数据科学家 · 兼容控制台");
-    // Windows：控制台窗口同样启动即最大化（与主窗口一致）。
+        .title("数据科学家");
+    // Windows：正式界面窗口启动即最大化（与启动页一致）。
     #[cfg(windows)]
     {
         console_builder = console_builder.maximized(true);
@@ -111,6 +111,12 @@ async fn open_legacy_console(
         })
         .build()
         .map_err(|error| error.to_string())?;
+    // 单窗口体验：正式界面窗口就位后关闭启动页窗口，视觉上是同一窗口
+    // 原地从“正在启动”切换为正式应用。顺序必须先建后关——全部窗口
+    // 关闭会触发应用退出。
+    if let Some(startup) = app.get_webview_window("main") {
+        let _ = startup.close();
+    }
     Ok(())
 }
 

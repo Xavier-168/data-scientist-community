@@ -7,7 +7,7 @@ import { useStartupState } from './startup/useStartupState';
 import { startupBridge } from './tauri/bridge';
 
 // Windows 包没有 macOS 那个「打开数据中心」助手 App，就绪后由壳内
-// 直接拉起 legacy 控制台窗口（对齐源码模式 start_monitor 的自动开页行为）。
+// 拉起正式界面窗口并关闭启动页（单窗口体验：启动页 → 原地切换为应用）。
 // 冷启动尾声 sidecar 连接偶发未就绪，失败时重试几次而不是静默放弃。
 function useAutoOpenConsoleOnWindows(ready: boolean): void {
   const requested = useRef(false);
