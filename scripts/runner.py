@@ -5262,6 +5262,10 @@ def _terminate_process_tree(proc, *, requires_user_session: bool = False) -> Non
     if requires_user_session and callable(poll) and poll() is not None:
         return
     if os.name == "nt":
+        # 已退出的进程不 taskkill：Windows 会积极复用 PID，对死 PID 整树
+        # 强杀可能误杀无关进程（含本应用自身）
+        if callable(poll) and poll() is not None:
+            return
         # Windows 下 .cmd 包装使 proc.pid 指向 cmd.exe，proc.terminate() 只杀
         # 壳进程，node 采集器与 Playwright 浏览器会变成孤儿并继续占用授权
         # profile；taskkill /T /F 连同子孙进程整树终止（runner 是父进程不受影响）。
@@ -8473,18 +8477,41 @@ def _kill_stale_runner_processes():
 
 
 def _should_cleanup_stale_runners() -> bool:
+    # 监督态依赖 Job Object 保证“壳死即整树终止”，不做跨实例清理——
+    # 若两个实例同时运行，无条件清理会让双方 runner 互相重启乒乓。
     return not _is_tauri_supervised()
+
+
+def _exit_trace(text: str) -> None:
+    """退出原因追踪：诊断 runner 静默退出用，写状态目录 exit_trace.log。"""
+    try:
+        path = os.path.join(STATE_DIR, "exit_trace.log")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} pid={os.getpid()} {text}\n")
+    except Exception:
+        pass
 
 
 def _start_server():
     """Entry point callable from compiled launcher (_run.py)."""
     ensure_runtime_dirs()
+    _exit_trace("runner_start")
+    try:
+        import faulthandler
+
+        _faulthandler_file = open(
+            os.path.join(STATE_DIR, "faulthandler.log"), "a", encoding="utf-8"
+        )
+        faulthandler.enable(file=_faulthandler_file, all_threads=True)
+    except Exception:
+        pass
     if _should_cleanup_stale_runners():
         _kill_stale_runner_processes()
     unlock(force=True)
     clear_auth_locks()
 
     def _shutdown_on_signal(signum, frame):
+        _exit_trace(f"signal_{signum}_received")
         _stop_auth_health_monitor(join_timeout=1.0)
         unlock(force=True)
         clear_auth_locks()
@@ -8503,6 +8530,7 @@ def _start_server():
         Handler,
         allow_fallback=_is_tauri_supervised(),
     )
+    _exit_trace(f"bound_port={server.server_port}")
     if _is_tauri_supervised():
         print(_runner_ready_frame(server), flush=True)
         _start_supervised_license_background()
@@ -8511,10 +8539,15 @@ def _start_server():
     _start_auth_health_monitor()
     try:
         server.serve_forever()
+        _exit_trace("serve_forever_returned")
+    except BaseException as exc:
+        _exit_trace(f"serve_forever_exception:{type(exc).__name__}:{exc!r}")
+        raise
     finally:
         _stop_auth_health_monitor()
         unlock(force=True)
         clear_auth_locks()
+        _exit_trace("runner_exit")
 
 
 if __name__ == "__main__":

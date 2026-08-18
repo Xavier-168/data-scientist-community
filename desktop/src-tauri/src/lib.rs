@@ -67,6 +67,21 @@ async fn open_legacy_console(
         return Ok(());
     }
     let connection = sidecar.connection().await.ok_or("sidecar_not_ready")?;
+    // 健康门通过到窗口真正导航之间仍有竞态（runner 刚死/端口未就绪），
+    // WebView2 对拒绝连接只显示死胡同错误页；创建窗口前先确认端口可连。
+    let mut probe_ok = false;
+    for _ in 0..10 {
+        match tokio::net::TcpStream::connect(("127.0.0.1", connection.port())).await {
+            Ok(_) => {
+                probe_ok = true;
+                break;
+            }
+            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(300)).await,
+        }
+    }
+    if !probe_ok {
+        return Err("sidecar_not_ready".into());
+    }
     let url = tauri::Url::parse(&format!(
         "http://127.0.0.1:{}/monitor#session={}",
         connection.port(),
