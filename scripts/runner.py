@@ -836,7 +836,9 @@ DEFAULT_CONFIG = {
     "workspace_name": "本地数据工作台",
     "min_publish_date": "2026-01-01",
     "browser_channel": _detect_default_browser_channel(),
-    "enabled_platforms": [],
+    # 首启默认启用全部平台：初始化向导的"一键授权所选平台"开箱即用，
+    # 否则空列表会让按钮静默早退（仅短暂 toast），用户以为没反应
+    "enabled_platforms": list(VALID_PLATFORM_IDS),
     "onboarding_completed": False,
     "feishu_enabled": False,
     "feishu_auto_sync": False,
