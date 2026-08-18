@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import os
 import re
+import sys
 import warnings
 from pathlib import Path
 from typing import Optional
@@ -9,6 +11,11 @@ from typing import Optional
 import pandas as pd
 
 warnings.filterwarnings("ignore", category=UserWarning, module="openpyxl")
+
+# 嵌入式 Python（._pth）不会把脚本目录加进 sys.path，需自举以支持同目录导入
+_SELF_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SELF_DIR not in sys.path:
+    sys.path.insert(0, _SELF_DIR)
 
 
 COUNT_FIELDS = ["播放量", "点赞量", "评论量", "分享量", "收藏量", "涨粉量"]

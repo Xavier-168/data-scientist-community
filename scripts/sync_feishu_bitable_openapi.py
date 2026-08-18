@@ -12,6 +12,7 @@ import ssl
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -22,7 +23,11 @@ import certifi
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
-from runtime_paths import resolve_auth_dir, resolve_downloads_dir, seed_state_from_bundle
+# Windows 嵌入式 Python（._pth）不把脚本目录加入 sys.path，本地模块需要自举。
+_SELF_DIR = os.path.dirname(os.path.abspath(__file__))
+if _SELF_DIR not in sys.path:
+    sys.path.insert(0, _SELF_DIR)
+from runtime_paths import resolve_auth_dir, resolve_downloads_dir, seed_state_from_bundle  # noqa: E402
 
 STATE_DIR = Path(seed_state_from_bundle(ROOT_DIR))
 AUTH_DIR = Path(resolve_auth_dir(ROOT_DIR, STATE_DIR))
@@ -72,12 +77,45 @@ CLI_FIELD_VISIBILITY_RETRY_DELAYS = (0.5, 1.0, 2.0, 4.0)
 
 
 class SyncTimeoutError(TimeoutError):
-    """signal.SIGALRM 触发的单表同步超时"""
+    """单表同步超时（POSIX 由 SIGALRM 触发，Windows 由看门狗线程触发）"""
     pass
 
 
 def _alarm_handler(signum, frame):
     raise SyncTimeoutError("同步超时")
+
+
+def _run_sync_with_timeout(fn, timeout_seconds):
+    """表级同步看门狗。
+
+    POSIX 保留原 SIGALRM 机制（可在阻塞的系统调用中同步打断）；
+    Windows 无 SIGALRM，改为工作线程 + join 超时：超时后主流程立即
+    以 SyncTimeoutError 中止，工作线程作为 daemon 随进程退出。
+    """
+    if os.name != "nt":
+        signal.signal(signal.SIGALRM, _alarm_handler)
+        signal.alarm(timeout_seconds)
+        try:
+            return fn()
+        finally:
+            signal.alarm(0)
+
+    outcome = {}
+
+    def _worker():
+        try:
+            outcome["result"] = fn()
+        except BaseException as exc:  # noqa: BLE001 - 原样转发到调用线程
+            outcome["error"] = exc
+
+    worker = threading.Thread(target=_worker, name="feishu-sync-watchdog", daemon=True)
+    worker.start()
+    worker.join(timeout_seconds)
+    if worker.is_alive():
+        raise SyncTimeoutError(f"同步超时（>{timeout_seconds}s）")
+    if "error" in outcome:
+        raise outcome["error"]
+    return outcome.get("result")
 
 
 def load_env_file(path: Path):
@@ -98,7 +136,12 @@ def build_ssl_context():
 
 
 def resolve_npx_bin() -> str:
-    return shutil.which("npx") or ""
+    names = ("npx.cmd", "npx.exe", "npx") if os.name == "nt" else ("npx",)
+    for name in names:
+        found = shutil.which(name)
+        if found:
+            return found
+    return ""
 
 
 def _sort_existing_paths(paths: list[str]) -> list[str]:
@@ -291,30 +334,13 @@ def _replace_cli_identity(cmd: list[str], identity: str) -> list[str]:
 
 def run_lark_cli_with_user_fallback(cmd: list[str], *, timeout: int = 120, cwd: Path | None = None):
     # 捕获子进程超时，转为 RuntimeError 避免未处理的 TimeoutExpired 崩溃
-    try:
-        proc = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=timeout,
-            env=lark_cli_env(),
-            cwd=str(cwd) if cwd else None,
-        )
-    except subprocess.TimeoutExpired as exc:
-        cmd_summary = " ".join(cmd[:6]) if len(cmd) > 6 else " ".join(cmd)
-        raise RuntimeError(f"lark-cli 命令超时 ({timeout}s): {cmd_summary}") from exc
-    if proc.returncode == 0:
-        return proc
-    detail = "\n".join(part for part in ((proc.stderr or "").strip(), (proc.stdout or "").strip()) if part)
-    if is_cli_bot_permission_error_text(detail):
-        user_cmd = _replace_cli_identity(cmd, "user")
-        if user_cmd != cmd:
+    def _run(command: list[str]) -> subprocess.CompletedProcess:
+        # 仅对进程拉起失败（OSError，如杀软瞬时拦截）重试一次；
+        # 命令已执行但失败/超时不盲目重试，避免写入类操作重复提交
+        for attempt in range(2):
             try:
-                # user fallback 同样需要超时保护
                 return subprocess.run(
-                    user_cmd,
+                    command,
                     capture_output=True,
                     text=True,
                     encoding="utf-8",
@@ -324,8 +350,23 @@ def run_lark_cli_with_user_fallback(cmd: list[str], *, timeout: int = 120, cwd: 
                     cwd=str(cwd) if cwd else None,
                 )
             except subprocess.TimeoutExpired as exc:
-                cmd_summary = " ".join(user_cmd[:6]) if len(user_cmd) > 6 else " ".join(user_cmd)
-                raise RuntimeError(f"lark-cli 命令超时 ({timeout}s, user fallback): {cmd_summary}") from exc
+                cmd_summary = " ".join(command[:6]) if len(command) > 6 else " ".join(command)
+                raise RuntimeError(f"lark-cli 命令超时 ({timeout}s): {cmd_summary}") from exc
+            except OSError:
+                if attempt == 0:
+                    time.sleep(1.5)
+                    continue
+                raise
+
+    proc = _run(cmd)
+    if proc.returncode == 0:
+        return proc
+    detail = "\n".join(part for part in ((proc.stderr or "").strip(), (proc.stdout or "").strip()) if part)
+    if is_cli_bot_permission_error_text(detail):
+        user_cmd = _replace_cli_identity(cmd, "user")
+        if user_cmd != cmd:
+            # user fallback 复用同一执行器（超时保护 + 拉起失败重试）
+            return _run(user_cmd)
     return proc
 
 
@@ -1453,22 +1494,22 @@ def sync_all_tables(
     for table_definition in table_definitions:
         table_name = table_definition["name"]
         rows = tables.get(table_name, [])
-        signal.signal(signal.SIGALRM, _alarm_handler)
-        signal.alarm(TABLE_SYNC_TIMEOUT)
         try:
-            result = sync_table(
-                app_token,
-                table_definition,
-                rows,
-                token,
-                table_map,
-                use_cli=use_cli,
-                checkpoint=checkpoint,
-                checkpoint_path=checkpoint_path,
-                strict_schema=bool(strict_schema),
+            result = _run_sync_with_timeout(
+                lambda definition=table_definition: sync_table(
+                    app_token,
+                    definition,
+                    rows,
+                    token,
+                    table_map,
+                    use_cli=use_cli,
+                    checkpoint=checkpoint,
+                    checkpoint_path=checkpoint_path,
+                    strict_schema=bool(strict_schema),
+                ),
+                TABLE_SYNC_TIMEOUT,
             )
         except SyncTimeoutError:
-            signal.alarm(0)
             print(
                 f"[timeout] {table_name}: sync exceeded {TABLE_SYNC_TIMEOUT}s",
                 file=sys.stderr,
@@ -1481,11 +1522,6 @@ def sync_all_tables(
                 "warnings": warnings,
                 "checkpoint_kept": bool(checkpoint_path and checkpoint_path.exists()),
             }
-        except Exception:
-            signal.alarm(0)
-            raise
-        finally:
-            signal.alarm(0)
         results.append(result)
         warnings.extend(result.get("warnings") or [])
         print(

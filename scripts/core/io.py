@@ -10,6 +10,25 @@ import json
 import os
 import shutil
 import tempfile
+import time
+
+
+_REPLACE_BUSY_ATTEMPTS = 4
+_REPLACE_BUSY_DELAY_SECONDS = 0.3
+
+
+def _os_replace_with_retry(temp_path: str, file_path: str) -> None:
+    """Windows 上目标文件被并发读取的瞬间（supervisor 每 250ms 轮询进度）
+    os.replace 会抛 PermissionError，短暂重试消化掉读写竞态窗口。"""
+    for attempt in range(_REPLACE_BUSY_ATTEMPTS):
+        try:
+            os.replace(temp_path, file_path)
+            return
+        except PermissionError:
+            if attempt < _REPLACE_BUSY_ATTEMPTS - 1:
+                time.sleep(_REPLACE_BUSY_DELAY_SECONDS)
+            else:
+                raise
 
 
 def ensure_parent_dir(file_path: str) -> None:
@@ -26,11 +45,13 @@ def write_json_file_atomically(file_path: str, payload, *, indent: int | None = 
             json.dump(payload, f, ensure_ascii=False, indent=indent)
             f.flush()
             os.fsync(f.fileno())
-        os.replace(temp_path, file_path)
+        _os_replace_with_retry(temp_path, file_path)
     finally:
         try:
             os.remove(temp_path)
         except FileNotFoundError:
+            pass
+        except OSError:
             pass
 
 
@@ -82,5 +103,14 @@ def remove_tree_if_exists(dir_path: str, *, allowed_root: str) -> bool:
         return False
     if not os.path.isdir(dir_path):
         raise ValueError(f"expected_directory_but_got_file: {dir_path}")
-    shutil.rmtree(dir_path)
+    # Windows 删除目录树时任一文件被占用即中止；重试一次后放弃残留
+    # （ignore_errors），调用方语义是“尽量清理”而非强一致删除。
+    for attempt in range(2):
+        try:
+            shutil.rmtree(dir_path)
+            return True
+        except OSError:
+            if attempt == 0:
+                time.sleep(0.3)
+    shutil.rmtree(dir_path, ignore_errors=True)
     return True

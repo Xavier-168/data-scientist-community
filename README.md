@@ -88,6 +88,31 @@ chmod +x start.sh scripts/*.sh
 
 如果第一条检查或 `python3 -m venv` 出现 `dlopen`、`pyexpat` 或 `ensurepip` 错误，说明当前 Python 安装的标准库已损坏；先重装一个完整的 Python（推荐 3.12），并将上述命令中的 `python3` 替换为对应命令（例如 `python3.12`）。不要复用创建失败的 `.venv`。
 
+### Windows（源码运行）
+
+Windows 10+、Python 3.12、Node.js 22.12+（可用 `DS_NODE22_DIR` 指向便携版目录，或放到 `%USERPROFILE%\nodejs22`）：
+
+```bat
+python -m venv .venv
+.venv\Scripts\python -m pip install -r requirements.txt
+npm ci
+npx playwright install chromium
+start.bat
+```
+
+运行数据默认写入 `%APPDATA%\数据科学家 Community\`。四个平台的采集包装脚本为 `scripts\run_*.cmd`（与 `run_*.sh` 契约一致）。
+
+### Windows（构建 NSIS 安装包）
+
+需要 Rust stable (MSVC) 与 Visual Studio Build Tools（C++ 工作负载）：
+
+```bash
+.venv/Scripts/python -m pip install -r requirements-build-windows.txt
+.venv/Scripts/python scripts/build_windows_release.py
+```
+
+产物为 `desktop/src-tauri/target/release/bundle/nsis/*-setup.exe`（每用户安装，无需管理员）。运行时包（内嵌 Python/Node/Chromium）在 `build/windows-runtime/` 下构建，清单由 Ed25519 私钥签名（首次自动生成于 `.signing-keys/`，勿提交）。发版核对见 [RELEASE_GATE-WINDOWS.md](RELEASE_GATE-WINDOWS.md)。
+
 服务默认监听 `127.0.0.1:8811`。首次采集需要在系统浏览器窗口中由用户本人完成扫码或登录。运行数据、Cookie/Profile、登录态检查元数据和 Playwright 浏览器默认写入 `~/Library/Application Support/数据科学家 Community/`，不会写入源码目录；可通过 `YIRENGONGIS_STATE_DIR` 显式覆盖。不要把状态目录、日志、截图或导出数据提交到 Git。
 
 开发者可执行：

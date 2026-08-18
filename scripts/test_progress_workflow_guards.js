@@ -1266,6 +1266,7 @@ async function testAuthorizingPlatformNeverUsesCollectionCopyOrAnimation() {
   });
 }
 
+
 async function testFeishuOnlyRunsFallbackToPlatformsWhenPlatformResultsAreEmpty() {
   const scenario = buildScenario({
     configSummary: {
@@ -1340,6 +1341,7 @@ async function main() {
   await testAuthRequiredStateDoesNotPretendToBeCompleted();
   await testQueuedPlatformIsNotPresentedAsActivelyCollecting();
   await testAuthorizingPlatformNeverUsesCollectionCopyOrAnimation();
+
   await testFeishuOnlyRunsFallbackToPlatformsWhenPlatformResultsAreEmpty();
 }
 
@@ -1358,6 +1360,7 @@ const selectedRun = process.argv.includes("--reliability-only")
   ? testQueuedPlatformIsNotPresentedAsActivelyCollecting
   : process.argv.includes("--authorizing-only")
   ? testAuthorizingPlatformNeverUsesCollectionCopyOrAnimation
+
   : (process.argv.includes("--onboarding-auth-only")
     ? testWizardRequiresEverySelectedPlatformToBeAuthorized
     : main);

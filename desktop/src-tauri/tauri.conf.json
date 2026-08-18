@@ -34,14 +34,26 @@
   "bundle": {
     "active": true,
     "targets": [
-      "app"
+      "app",
+      "nsis"
     ],
     "macOS": {
       "minimumSystemVersion": "11.0"
     },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser",
+        "languages": ["SimpChinese"],
+        "installerIcon": "icons/icon.ico"
+      }
+    },
+    "resources": {
+      "resources/**/*": "resources/"
+    },
     "icon": [
-      "icons/community-icon.icns",
-      "icons/community-icon.png"
+      "icons/icon.icns",
+      "icons/icon.ico",
+      "icons/icon.png"
     ]
   }
 }

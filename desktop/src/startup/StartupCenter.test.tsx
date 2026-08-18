@@ -20,7 +20,7 @@ afterEach(cleanup);
 describe('StartupCenter', () => {
   it('renders progress and exposes startup logs immediately', async () => {
     const openLogs = vi.fn();
-    render(<StartupCenter state={base} onRetry={vi.fn()} onOpenLogs={openLogs} />);
+    render(<StartupCenter state={base} onRetry={vi.fn()} onOpenLogs={openLogs} onOpenConsole={vi.fn()} />);
 
     expect(screen.getByRole('heading', { name: '数据科学家 Community' })).toBeVisible();
     expect(screen.getByText('正在准备核心服务')).toBeVisible();
@@ -36,7 +36,7 @@ describe('StartupCenter', () => {
   });
 
   it('shows each preparation stage in plain language', () => {
-    render(<StartupCenter state={base} onRetry={vi.fn()} onOpenLogs={vi.fn()} />);
+    render(<StartupCenter state={base} onRetry={vi.fn()} onOpenLogs={vi.fn()} onOpenConsole={vi.fn()} />);
 
     expect(screen.getByText('核心服务').closest('.status-item')).toHaveTextContent('准备中');
     expect(screen.getByText('采集引擎').closest('.status-item')).toHaveTextContent('后台准备');
@@ -44,7 +44,7 @@ describe('StartupCenter', () => {
   });
 
   it('does not offer retry while startup can still make progress', () => {
-    render(<StartupCenter state={base} onRetry={vi.fn()} onOpenLogs={vi.fn()} />);
+    render(<StartupCenter state={base} onRetry={vi.fn()} onOpenLogs={vi.fn()} onOpenConsole={vi.fn()} />);
 
     expect(screen.queryByRole('button', { name: '重新准备' })).not.toBeInTheDocument();
   });
@@ -62,6 +62,7 @@ describe('StartupCenter', () => {
         }}
         onRetry={retry}
         onOpenLogs={vi.fn()}
+        onOpenConsole={vi.fn()}
       />,
     );
 
@@ -71,7 +72,7 @@ describe('StartupCenter', () => {
 
   it('announces the changing startup message without announcing static chrome', () => {
     const { container } = render(
-      <StartupCenter state={base} onRetry={vi.fn()} onOpenLogs={vi.fn()} />,
+      <StartupCenter state={base} onRetry={vi.fn()} onOpenLogs={vi.fn()} onOpenConsole={vi.fn()} />,
     );
 
     const liveRegion = container.querySelector('[aria-live="polite"]');

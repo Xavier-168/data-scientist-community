@@ -2,4 +2,5 @@
 channel = "stable"
 profile = "minimal"
 components = ["rustfmt", "clippy"]
-targets = ["aarch64-apple-darwin"]
+# 按宿主平台默认目标构建：macOS=arm64-apple-darwin，Windows=x86_64-pc-windows-msvc
+targets = ["aarch64-apple-darwin", "x86_64-pc-windows-msvc"]

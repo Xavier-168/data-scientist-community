@@ -109,8 +109,20 @@ def _terminate_process(
 ) -> None:
     if proc.poll() is not None:
         return
+    if os.name == "nt":
+        # Windows 下采集命令经 cmd.exe 包装，proc.terminate() 只杀壳进程；
+        # taskkill /T /F 连同 node 采集器与浏览器整树终止，避免孤儿继续
+        # 占用授权 profile / 写进度文件（runner 是父进程，不在树内）。
+        from core.process import terminate_pid_tree
+
+        terminate_pid_tree(proc.pid, grace_seconds=grace_seconds)
+        try:
+            proc.wait(timeout=max(float(grace_seconds), 0.05) + 1)
+        except subprocess.TimeoutExpired:
+            pass
+        return
     try:
-        if os.name != "nt" and not requires_user_session:
+        if not requires_user_session:
             os.killpg(os.getpgid(proc.pid), signal.SIGTERM)
         else:
             proc.terminate()
@@ -122,7 +134,7 @@ def _terminate_process(
     except subprocess.TimeoutExpired:
         pass
     try:
-        if os.name != "nt" and not requires_user_session:
+        if not requires_user_session:
             os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
         else:
             proc.kill()

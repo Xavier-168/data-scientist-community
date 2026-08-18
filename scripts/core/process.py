@@ -66,6 +66,117 @@ def sort_existing_paths(paths: list[str]) -> list[str]:
     )
 
 
+def _powershell_output(script: str, timeout: float = 8.0) -> str:
+    """执行 PowerShell 片段并返回 stdout（失败返回空串）。仅 Windows 使用。"""
+    # PowerShell 5.1 重定向输出默认 OEM 码页；强制控制台输出为 UTF-8 后
+    # 才能按 utf-8 解码含中文路径的 CommandLine。
+    prologue = "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; "
+    command = ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", prologue + script]
+    kwargs = {
+        "capture_output": True,
+        "text": True,
+        "encoding": "utf-8",
+        "errors": "replace",
+        "timeout": timeout,
+    }
+    if os.name == "nt":
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    try:
+        result = subprocess.run(command, **kwargs)
+    except Exception:
+        return ""
+    if result.returncode != 0:
+        return ""
+    return str(result.stdout or "")
+
+
+def port_listener_pids(port: int) -> list[int]:
+    """返回监听本地端口的进程 PID。
+
+    POSIX 用 lsof；Windows 用 Get-NetTCPConnection（netstat 输出解析在
+    本地化系统上不可靠）。
+    """
+    if os.name == "nt":
+        script = (
+            f"(Get-NetTCPConnection -LocalPort {int(port)} -State Listen "
+            "-ErrorAction SilentlyContinue).OwningProcess | Sort-Object -Unique"
+        )
+        pids = []
+        for line in _powershell_output(script).splitlines():
+            text = line.strip()
+            if text.isdigit():
+                pids.append(int(text))
+        return pids
+    try:
+        result = subprocess.run(
+            ["lsof", "-ti", f":{port}", "-sTCP:LISTEN"],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=3,
+        )
+    except Exception:
+        return []
+    return [
+        int(text)
+        for text in (result.stdout or "").splitlines()
+        if text.strip().isdigit()
+    ]
+
+
+def process_command(pid: int) -> str:
+    """返回进程完整命令行（识别本产品进程用；失败返回空串）。"""
+    if os.name == "nt":
+        script = f"(Get-CimInstance Win32_Process -Filter \"ProcessId={int(pid)}\").CommandLine"
+        return _powershell_output(script).strip()
+    try:
+        result = subprocess.run(
+            ["ps", "-p", str(pid), "-o", "command="],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=3,
+        )
+    except Exception:
+        return ""
+    return str(result.stdout or "").strip()
+
+
+def terminate_pid_tree(pid: int, *, grace_seconds: float = 2.0) -> bool:
+    """终止进程及其子进程。Windows 用 taskkill /T /F；POSIX 先 SIGTERM 后 SIGKILL。"""
+    if pid <= 0 or pid == os.getpid():
+        return False
+    if os.name == "nt":
+        kwargs = {
+            "capture_output": True,
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+            "timeout": 15,
+        }
+        kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        try:
+            result = subprocess.run(["taskkill", "/T", "/F", "/PID", str(pid)], **kwargs)
+        except Exception:
+            return False
+        return result.returncode == 0
+    try:
+        os.kill(pid, signal.SIGTERM)
+    except (ProcessLookupError, PermissionError):
+        return False
+    deadline = time.time() + max(0.1, grace_seconds)
+    while time.time() < deadline and pid_alive(pid):
+        time.sleep(0.1)
+    if pid_alive(pid):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except (ProcessLookupError, PermissionError):
+            pass
+    return True
+
+
 def profile_path_candidates(profile_dir: str) -> set[str]:
     candidates = set()
     for path_value in (profile_dir, os.path.abspath(profile_dir), os.path.realpath(profile_dir)):
@@ -90,7 +201,10 @@ def terminate_profile_browsers(profile_dir: str, *, grace_seconds: float = 1.5) 
         return []
     try:
         output = subprocess.check_output(
-            ["ps", "-axo", "pid=,command="], text=True, errors="replace"
+            ["ps", "-axo", "pid=,command="],
+            text=True,
+            encoding="utf-8",
+            errors="replace",
         )
     except Exception:
         return []

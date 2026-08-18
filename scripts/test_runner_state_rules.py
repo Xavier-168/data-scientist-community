@@ -261,7 +261,9 @@ class RunnerSubprocessTests(unittest.TestCase):
         self.assertIs(result, supervised_result)
         kwargs = supervisor.call_args.kwargs
         self.assertEqual(kwargs["inactivity_timeout"], runner.PLATFORM_INACTIVITY_TIMEOUT)
-        self.assertTrue(str(kwargs["log_path"]).endswith("runs/run-1/douyin.log"))
+        self.assertTrue(
+            str(kwargs["log_path"]).replace("\\", "/").endswith("runs/run-1/douyin.log")
+        )
         self.assertEqual(str(kwargs["progress_path"]), os.path.join(temp_dir, "douyin_progress.json"))
 
     def test_run_script_keeps_interactive_auth_in_user_session(self):
@@ -302,8 +304,8 @@ class RunnerSubprocessTests(unittest.TestCase):
 
         with (
             patch.object(runner.subprocess, "Popen", return_value=fake_proc),
-            patch.object(runner.os, "killpg", new=MagicMock()) as killpg_mock,
-            patch.object(runner.os, "getpgid", new=MagicMock()),
+            patch.object(runner.os, "killpg", new=MagicMock(), create=True) as killpg_mock,
+            patch.object(runner.os, "getpgid", new=MagicMock(), create=True),
             patch.object(runner.os, "name", "posix"),
         ):
             handler._run_script(
@@ -336,8 +338,9 @@ class RunnerSubprocessTests(unittest.TestCase):
         killpg_mock = MagicMock()
         with (
             patch.object(runner.subprocess, "Popen", return_value=fake_proc),
-            patch.object(runner.os, "killpg", new=killpg_mock),
-            patch.object(runner.os, "getpgid", return_value=99999),
+            patch.object(runner.os, "killpg", new=killpg_mock, create=True),
+            patch.object(runner.os, "getpgid", return_value=99999, create=True),
+            patch.object(runner.os, "setsid", new=MagicMock(), create=True),
             patch.object(runner.os, "name", "posix"),
         ):
             handler._run_script(
@@ -604,8 +607,16 @@ class RunnerArtifactIntegrationTests(unittest.TestCase):
 
             env, mapping = runner._platform_artifact_contract("bilibili", workspace)
 
-        self.assertTrue(env["BILI_OUTPUT_PATH"].endswith("runs/run-1/bilibili/bilibili_all_videos.xlsx"))
-        self.assertTrue(env["BILI_TEMP_ROWS_PATH"].endswith("runs/run-1/bilibili/bilibili_rows.json"))
+        self.assertTrue(
+            env["BILI_OUTPUT_PATH"].replace("\\", "/").endswith(
+                "runs/run-1/bilibili/bilibili_all_videos.xlsx"
+            )
+        )
+        self.assertTrue(
+            env["BILI_TEMP_ROWS_PATH"].replace("\\", "/").endswith(
+                "runs/run-1/bilibili/bilibili_rows.json"
+            )
+        )
         self.assertEqual(pathlib.Path(env["BILI_OUTPUT_PATH"]), next(iter(mapping)))
         self.assertEqual(next(iter(mapping.values())).name, "bilibili_all_videos.xlsx")
 
@@ -2570,6 +2581,7 @@ class FeishuVerificationUrlOpenTests(unittest.TestCase):
             stdout=runner.subprocess.PIPE,
             stderr=runner.subprocess.STDOUT,
             text=True,
+            encoding="utf-8",
         )
         started = time.monotonic()
         with self.assertRaises(runner.subprocess.TimeoutExpired):
@@ -2583,6 +2595,7 @@ class FeishuVerificationUrlOpenTests(unittest.TestCase):
             stdout=runner.subprocess.PIPE,
             stderr=runner.subprocess.STDOUT,
             text=True,
+            encoding="utf-8",
         )
         lines = []
         runner._consume_lark_cli_output(proc, lines.append, timeout_seconds=2)

@@ -3,6 +3,9 @@ use std::{
     io::{self, Read, Write},
 };
 
+#[cfg(windows)]
+use std::path::Path;
+
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -123,6 +126,7 @@ impl RuntimeState {
     }
 }
 
+#[cfg(unix)]
 pub fn load_at(directory: &File) -> Result<RuntimeState, StateError> {
     use rustix::fs::{fstat, openat, FileType, Mode, OFlags};
 
@@ -156,10 +160,52 @@ pub fn load_at(directory: &File) -> Result<RuntimeState, StateError> {
     Ok(state)
 }
 
+/// Windows 版 `load_at`：std 无法从目录句柄取回路径（也没有 openat），
+/// 因此直接以路径读取 state.json。文件类型/大小上限与严格 JSON 校验
+/// 语义与 Unix 实现一致；符号链接（junction/reparse point）一律拒绝。
+#[cfg(windows)]
+pub fn load_at(directory: &Path) -> Result<RuntimeState, StateError> {
+    let path = directory.join(STATE_FILE_NAME);
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Ok(RuntimeState::default())
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.file_type().is_file() {
+        return Err(StateError::Invalid("state_file_type"));
+    }
+    if metadata.len() > MAX_STATE_BYTES as u64 {
+        return Err(StateError::TooLarge);
+    }
+    let mut file = File::open(&path)?;
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    Read::by_ref(&mut file)
+        .take((MAX_STATE_BYTES + 1) as u64)
+        .read_to_end(&mut bytes)?;
+    if bytes.len() > MAX_STATE_BYTES {
+        return Err(StateError::TooLarge);
+    }
+    let state: RuntimeState = serde_json::from_slice(&bytes)?;
+    state.validate()?;
+    Ok(state)
+}
+
+#[cfg(unix)]
 pub fn save_at(directory: &File, state: &RuntimeState) -> Result<(), StateError> {
     save_at_with_hook(directory, state, || {})
 }
 
+/// Windows 版 `save_at`：写入唯一临时名后以 `std::fs::rename` 原子替换
+/// （Windows 允许 rename 覆盖已存在的普通文件）。与 Unix 的 fd 锚定
+/// 不同，Windows 依赖“唯一临时名 + rename”保证不发布半写的 state.json。
+#[cfg(windows)]
+pub fn save_at(directory: &Path, state: &RuntimeState) -> Result<(), StateError> {
+    save_at_with_hook(directory, state, || {})
+}
+
+#[cfg(unix)]
 fn save_at_with_hook<F: FnOnce()>(
     directory: &File,
     state: &RuntimeState,
@@ -225,19 +271,77 @@ fn save_at_with_hook<F: FnOnce()>(
     }
 }
 
-#[cfg(test)]
+#[cfg(windows)]
+fn save_at_with_hook<F: FnOnce()>(
+    directory: &Path,
+    state: &RuntimeState,
+    after_temporary_sync: F,
+) -> Result<(), StateError> {
+    state.validate()?;
+    let bytes = serde_json::to_vec(state)?;
+    if bytes.len() > MAX_STATE_BYTES {
+        return Err(StateError::TooLarge);
+    }
+    let temporary = directory.join(format!(".state.json.tmp-{}", uuid::Uuid::new_v4()));
+    let mut temporary_created = false;
+    let mut renamed = false;
+    let result = (|| -> Result<(), StateError> {
+        let mut file = File::create(&temporary)?;
+        temporary_created = true;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+        after_temporary_sync();
+        // Windows 的 rename 可原子替换已存在的普通文件；目录无法 fsync（省略）。
+        std::fs::rename(&temporary, directory.join(STATE_FILE_NAME))?;
+        renamed = true;
+        Ok(())
+    })();
+
+    let cleanup_error = if temporary_created && !renamed {
+        match std::fs::remove_file(&temporary) {
+            Ok(()) => None,
+            Err(ref error) if error.kind() == io::ErrorKind::NotFound => None,
+            Err(error) => Some(error),
+        }
+    } else {
+        None
+    };
+    match (result, cleanup_error) {
+        (Err(primary), Some(cleanup)) => Err(StateError::Cleanup {
+            primary: Box::new(primary),
+            cleanup,
+        }),
+        (Err(primary), None) => Err(primary),
+        (Ok(()), Some(cleanup)) => Err(cleanup.into()),
+        (Ok(()), None) => Ok(()),
+    }
+}
+
+#[cfg(all(test, unix))]
 mod tests {
+    use std::{fs, path::Path, sync::{Arc, Barrier}, time::Duration};
+
+    #[cfg(unix)]
     use std::{
-        fs::{self, File},
+        fs::File,
         os::unix::{
             ffi::OsStrExt,
             fs::{MetadataExt, PermissionsExt},
         },
-        sync::{Arc, Barrier},
-        time::Duration,
     };
 
     use super::*;
+
+    /// 测试用目录锚点：Unix 为已打开的目录 fd，Windows 为目录路径。
+    #[cfg(unix)]
+    fn anchor(directory: &Path) -> File {
+        File::open(directory).unwrap()
+    }
+
+    #[cfg(windows)]
+    fn anchor(directory: &Path) -> std::path::PathBuf {
+        directory.to_path_buf()
+    }
 
     #[test]
     fn advance_rotates_active_and_previous_per_runtime_kind() {
@@ -272,7 +376,7 @@ mod tests {
     #[test]
     fn validation_and_loading_reject_unsafe_or_non_strict_state() {
         let temp = tempfile::tempdir().unwrap();
-        let directory = File::open(temp.path()).unwrap();
+        let directory = anchor(temp.path());
         for bytes in [
             br#"{"schema_version":2,"core":{"active":null,"previous":null},"collector":{"active":null,"previous":null},"unknown":true}"#.as_slice(),
             br#"{"schema_version":2,"core":{"active":null,"previous":null,"unknown":true},"collector":{"active":null,"previous":null}}"#,
@@ -310,7 +414,7 @@ mod tests {
     #[test]
     fn missing_state_loads_default_and_round_trip_is_mode_0600() {
         let temp = tempfile::tempdir().unwrap();
-        let directory = File::open(temp.path()).unwrap();
+        let directory = anchor(temp.path());
         assert_eq!(load_at(&directory).unwrap(), RuntimeState::default());
 
         let mut state = RuntimeState::default();
@@ -318,15 +422,19 @@ mod tests {
         save_at(&directory, &state).unwrap();
 
         assert_eq!(load_at(&directory).unwrap(), state);
-        assert_eq!(
-            fs::symlink_metadata(temp.path().join("state.json"))
-                .unwrap()
-                .mode()
-                & 0o777,
-            0o600
-        );
+        #[cfg(unix)]
+        {
+            assert_eq!(
+                fs::symlink_metadata(temp.path().join("state.json"))
+                    .unwrap()
+                    .mode()
+                    & 0o777,
+                0o600
+            );
+        }
     }
 
+    #[cfg(unix)]
     #[test]
     fn load_rejects_symlink_fifo_and_oversized_state_without_blocking() {
         use std::os::unix::fs::symlink;
@@ -352,6 +460,19 @@ mod tests {
         assert!(load_at(&directory).is_err());
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn oversized_state_is_rejected_on_windows() {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = anchor(temp.path());
+        fs::write(
+            temp.path().join("state.json"),
+            vec![b' '; 64 * 1024 + 1],
+        )
+        .unwrap();
+        assert!(load_at(&directory).is_err());
+    }
+
     #[test]
     fn concurrent_saves_never_publish_partial_json_or_leave_temps() {
         let temp = tempfile::tempdir().unwrap();
@@ -362,7 +483,7 @@ mod tests {
             let root = root.clone();
             let barrier = barrier.clone();
             workers.push(std::thread::spawn(move || {
-                let directory = File::open(root).unwrap();
+                let directory = anchor(&root);
                 barrier.wait();
                 for generation in 0..25 {
                     let mut state = RuntimeState::default();
@@ -378,7 +499,7 @@ mod tests {
             worker.join().unwrap();
         }
 
-        let directory = File::open(temp.path()).unwrap();
+        let directory = anchor(temp.path());
         load_at(&directory).unwrap().validate().unwrap();
         assert!(fs::read_dir(temp.path()).unwrap().all(|item| {
             !item
@@ -392,7 +513,7 @@ mod tests {
     #[test]
     fn invalid_save_does_not_replace_the_last_valid_state() {
         let temp = tempfile::tempdir().unwrap();
-        let directory = File::open(temp.path()).unwrap();
+        let directory = anchor(temp.path());
         let mut valid = RuntimeState::default();
         valid.advance(RuntimeKind::Core, "core-v1").unwrap();
         save_at(&directory, &valid).unwrap();
@@ -406,6 +527,7 @@ mod tests {
         assert_eq!(load_at(&directory).unwrap(), valid);
     }
 
+    #[cfg(unix)]
     #[test]
     fn cleanup_failure_reports_both_the_primary_and_cleanup_errors() {
         let temp = tempfile::tempdir().unwrap();

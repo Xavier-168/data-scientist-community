@@ -335,6 +335,39 @@ class LicenseManager:
     # --------------------------------------------------------
     # 机器指纹
     # --------------------------------------------------------
+    def _windows_wmi_value(self, wmi_class: str) -> str:
+        """读取 Windows 硬件序列号。
+
+        PowerShell CIM 优先（Windows 11 起 wmic 已被移除），wmic 兜底
+        （两者底层是同一 WMI 提供商，序列号取值一致，不影响既有指纹）。
+        """
+        ps_command = f"(Get-CimInstance {wmi_class}).SerialNumber"
+        commands = (
+            ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", ps_command],
+            ["wmic", wmi_class.split("_")[-1].lower(), "get", "serialnumber"],
+        )
+        popen_kwargs = {
+            "text": True,
+            "encoding": "utf-8",
+            "errors": "replace",
+            "timeout": 5,
+            "stderr": subprocess.DEVNULL,
+        }
+        if os.name == "nt":
+            popen_kwargs["creationflags"] = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        for command in commands:
+            try:
+                out = subprocess.check_output(command, **popen_kwargs)
+            except Exception:
+                continue
+            lines = [line.strip() for line in out.splitlines() if line.strip()]
+            if not lines:
+                continue
+            value = lines[-1]
+            if value and value.lower() != "serialnumber":
+                return value
+        return ""
+
     def get_machine_id(self):
         """生成当前机器的唯一标识（不可逆哈希）"""
         raw_parts = []
@@ -345,7 +378,7 @@ class LicenseManager:
             try:
                 out = subprocess.check_output(
                     ["ioreg", "-rd1", "-c", "IOPlatformExpertDevice"],
-                    text=True, timeout=5
+                    text=True, encoding="utf-8", errors="replace", timeout=5
                 )
                 for line in out.split("\n"):
                     if "IOPlatformUUID" in line:
@@ -356,22 +389,10 @@ class LicenseManager:
 
         elif system == "Windows":
             # Windows: 使用主板序列号 + BIOS序列号
-            try:
-                out = subprocess.check_output(
-                    ["wmic", "baseboard", "get", "serialnumber"],
-                    text=True, timeout=5
-                )
-                raw_parts.append(out.strip().split("\n")[-1].strip())
-            except Exception:
-                pass
-            try:
-                out = subprocess.check_output(
-                    ["wmic", "bios", "get", "serialnumber"],
-                    text=True, timeout=5
-                )
-                raw_parts.append(out.strip().split("\n")[-1].strip())
-            except Exception:
-                pass
+            for wmi_class in ("Win32_BaseBoard", "Win32_BIOS"):
+                serial = self._windows_wmi_value(wmi_class)
+                if serial:
+                    raw_parts.append(serial)
 
         # 后备方案: MAC 地址
         if not raw_parts:
@@ -396,11 +417,15 @@ class LicenseManager:
     # --------------------------------------------------------
     def _load_license(self):
         if os.path.exists(self.license_path):
-            try:
-                with open(self.license_path, "r") as f:
-                    return json.load(f)
-            except Exception:
-                return {}
+            # 主路径 utf-8；旧版本曾以系统 ANSI（GBK）写过，做一次回退兼容
+            for encoding in ("utf-8", "gbk"):
+                try:
+                    with open(self.license_path, "r", encoding=encoding) as f:
+                        return json.load(f)
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    continue
+                except OSError:
+                    return {}
         return {}
 
     def _load_trial(self):
@@ -415,7 +440,8 @@ class LicenseManager:
 
     def _save_license(self, data):
         os.makedirs(os.path.dirname(self.license_path), exist_ok=True)
-        with open(self.license_path, "w") as f:
+        # 显式 utf-8：Windows 默认 GBK，含中文客户名/服务端消息时会写崩
+        with open(self.license_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
         if os.name != "nt":
             try:

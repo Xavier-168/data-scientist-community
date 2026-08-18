@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -127,7 +128,8 @@ class FeishuCliPayloadTests(unittest.TestCase):
         self.assertTrue(data_value.startswith("@./"), data_value)
         self.assertEqual(recorded["cwd"], cli_temp_dir)
         self.assertNotEqual(recorded["cwd"], source_cwd)
-        self.assertEqual(recorded["payload_mode"], 0o600)
+        if os.name != "nt":  # Windows chmod 仅只读位语义，无 0o600
+            self.assertEqual(recorded["payload_mode"], 0o600)
         self.assertEqual(json.loads(recorded["payload_text"]), payload)
         self.assertFalse(recorded["payload_path"].exists(), recorded["payload_path"])
         self.assertEqual(list(source_cwd.glob(".lark-cli-json-*.json")), [])

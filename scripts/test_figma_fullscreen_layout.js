@@ -985,8 +985,9 @@ async function main() {
       const visualCanvas = snapshot.rectangles.canvas;
       const expectedCanvasWidth = DESIGN.canvas.width * expectedScale;
       const expectedCanvasHeight = DESIGN.canvas.height * expectedScale;
-      const expectedCanvasX = (viewport.width - expectedCanvasWidth) / 2;
-      const expectedCanvasY = (viewport.height - expectedCanvasHeight) / 2;
+      // 画布左上角锚定：宽度/高度余量统一留在右侧/底部并与阶段背景融合。
+      const expectedCanvasX = 0;
+      const expectedCanvasY = 0;
       const expectedSidebarEdge = expectedCanvasX + (DESIGN.sidebar.width * expectedScale);
       compareNumber(issues, `${label}.visualCanvas.x`, visualCanvas.x, expectedCanvasX, 0.02);
       compareNumber(issues, `${label}.visualCanvas.y`, visualCanvas.y, expectedCanvasY, 0.02);

@@ -1,9 +1,12 @@
 import { execFile, spawn } from 'node:child_process';
-import { constants as fsConstants } from 'node:fs';
+import { constants as fsConstants, existsSync } from 'node:fs';
 import { access, stat } from 'node:fs/promises';
 import { homedir } from 'node:os';
 import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
+
+const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 const execFileAsync = promisify(execFile);
 const RUST_TOOL_STOP_TIMEOUT_MS = 2_000;
@@ -83,6 +86,12 @@ async function findRustup() {
   for (const directory of (process.env.PATH ?? '').split(delimiter)) {
     if (directory) candidates.push(join(directory, 'rustup'));
   }
+  // Windows 上 rustup 默认装在每用户 ~/.cargo/bin，优先于 Unix 惯例路径
+  if (process.platform === 'win32') {
+    candidates.push(
+      join(process.env.USERPROFILE || homedir(), '.cargo', 'bin', 'rustup.exe'),
+    );
+  }
   candidates.push(
     '/opt/homebrew/bin/rustup',
     '/opt/homebrew/opt/rustup/bin/rustup',
@@ -130,7 +139,17 @@ async function run() {
     ...process.env,
     PATH: [toolchainBin, process.env.PATH].filter(Boolean).join(delimiter),
   };
-  const child = spawn(rustup, ['run', 'stable', tool, ...args], {
+
+  // Windows：rustup run 无法执行 npm 的 .cmd 垫片（CreateProcess 不认 .cmd），
+  // tauri CLI 重写为 node 直连其 JS 入口。
+  let toolCommand = [tool, ...args];
+  if (process.platform === 'win32' && tool === 'tauri') {
+    const tauriJs = join(ROOT, 'desktop', 'node_modules', '@tauri-apps', 'cli', 'tauri.js');
+    if (existsSync(tauriJs)) {
+      toolCommand = [process.execPath, tauriJs, ...args];
+    }
+  }
+  const child = spawn(rustup, ['run', 'stable', ...toolCommand], {
     detached: process.platform !== 'win32',
     env: childEnv,
     stdio: 'inherit',

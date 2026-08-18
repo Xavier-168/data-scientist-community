@@ -4,9 +4,10 @@ interface StartupCenterProps {
   state: StartupState;
   onRetry: () => void;
   onOpenLogs: () => void;
+  onOpenConsole: () => void;
 }
 
-export function StartupCenter({ state, onRetry, onOpenLogs }: StartupCenterProps) {
+export function StartupCenter({ state, onRetry, onOpenLogs, onOpenConsole }: StartupCenterProps) {
   const percent = Math.round(state.progress * 100);
 
   return (
@@ -87,6 +88,9 @@ export function StartupCenter({ state, onRetry, onOpenLogs }: StartupCenterProps
             <div className="startup-actions">
               <button className="button button-secondary" type="button" onClick={onOpenLogs}>
                 查看启动日志
+              </button>
+              <button className="button button-primary" type="button" onClick={onOpenConsole}>
+                打开控制台
               </button>
               {state.can_retry && (
                 <button className="button button-primary" type="button" onClick={onRetry}>

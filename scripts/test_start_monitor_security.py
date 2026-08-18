@@ -1,4 +1,5 @@
 import importlib.util
+import os
 import pathlib
 import tempfile
 import unittest
@@ -44,7 +45,8 @@ class StartMonitorSecurityTests(unittest.TestCase):
             self.assertNotEqual(state_dir, source_root)
             self.assertFalse((source_root / ".auth").exists())
             self.assertFalse((source_root / "downloads").exists())
-            self.assertEqual(state_dir.stat().st_mode & 0o777, 0o700)
+            if os.name != "nt":  # Windows 的 chmod 是只读位语义，无 0o700
+                self.assertEqual(state_dir.stat().st_mode & 0o777, 0o700)
 
     def test_explicit_state_dir_override_is_preserved(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -174,6 +176,10 @@ class StartMonitorSecurityTests(unittest.TestCase):
             saved_token = start_monitor.load_saved_session_token(root, state_dir)
             self.assertEqual(saved_token, popen_kwargs["env"]["YIRENGONGIS_SESSION_TOKEN"])
 
+    @unittest.skipIf(
+        os.name == "nt",
+        "macOS Launch Services 直启流程仅在 POSIX 验证（Windows 走 Popen 分支）",
+    )
     def test_safe_open_browser_prefers_direct_new_window_on_macos(self):
         popen_calls = []
 
@@ -227,9 +233,13 @@ class StartMonitorSecurityTests(unittest.TestCase):
             app_browser = app_browser_root / "Google Chrome for Testing"
             staged_browser.write_text("", encoding="utf-8")
             app_browser.write_text("", encoding="utf-8")
+            # Windows 侧的可执行名不同（chrome.exe），两种名字都放置，
+            # 保证 find_playwright_chromium 的目录扫描在两个平台都能命中。
+            (staged_root / "chrome.exe").write_text("", encoding="utf-8")
+            (app_browser_root / "chrome.exe").write_text("", encoding="utf-8")
 
             def fake_usable(path):
-                return path == app_browser
+                return path in (app_browser, app_browser_root / "chrome.exe")
 
             with (
                 patch.dict(
@@ -245,7 +255,7 @@ class StartMonitorSecurityTests(unittest.TestCase):
             ):
                 result = start_monitor.find_browser_executable(root, "chrome")
 
-            self.assertEqual(result, app_browser)
+            self.assertIn(result, (app_browser, app_browser_root / "chrome.exe"))
 
     def test_launcher_fails_visibly_when_forced_browser_is_unusable(self):
         with tempfile.TemporaryDirectory() as temp_dir:

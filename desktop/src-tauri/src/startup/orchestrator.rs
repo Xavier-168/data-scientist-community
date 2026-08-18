@@ -489,8 +489,26 @@ impl StartupOrchestrator {
             state.core.message = "核心运行时已就绪".into();
         })
         .await;
-        if let Err(error) = self.sidecar.start(&view).await {
-            self.fail(RetryStage::Sidecar, "sidecar_start_failed", error, false)
+        // 关闭后立即重开时，残留进程清理/端口回收偶发让首次拉起失败；
+        // 这种失败几秒后自愈——自动重试而不是直接进降级态。
+        let mut sidecar_error = String::new();
+        let mut sidecar_started = false;
+        for attempt in 0..3 {
+            if attempt > 0 {
+                tokio::time::sleep(Duration::from_millis(2000)).await;
+            }
+            match self.sidecar.start(&view).await {
+                Ok(_) => {
+                    sidecar_started = true;
+                    break;
+                }
+                Err(error) => {
+                    sidecar_error = error;
+                }
+            }
+        }
+        if !sidecar_started {
+            self.fail(RetryStage::Sidecar, "sidecar_start_failed", sidecar_error, false)
                 .await;
             self.settle_background(Some(&core), true).await;
             self.finish().await;
@@ -851,11 +869,17 @@ mod tests {
                 "version": format!("{kind}-v1")
             })
         };
+        // 清单架构跟随构建目标（macOS=arm64 / Windows=x86_64）
+        let target_arch = if cfg!(windows) { "x86_64" } else { "arm64" };
         let payload = json!({
-            "arch": "arm64",
+            "arch": target_arch,
             "build_version": "20260713",
             "key_id": "test-key",
-            "package_id": "data-scientist-community-mac-arm64",
+            "package_id": format!(
+                "data-scientist-community-{}-{}",
+                if cfg!(windows) { "win" } else { "mac" },
+                target_arch
+            ),
             "runtimes": {
                 "core": descriptor("core", vec!["frontend-compat/progress.html", "scripts/_run.py"]),
                 "collector": descriptor("collector", vec!["node_modules/playwright/package.json", "scripts/douyin_export.mjs"]),
@@ -900,12 +924,17 @@ mod tests {
         let store = StartupStore::default();
         let runtimes = RuntimeManager::new(
             state_root.clone(),
-            resource_root,
+            resource_root.clone(),
             Arc::clone(&manifest),
             crate::fault_injection::FaultInjection::default(),
         )
         .unwrap();
-        let views = ViewManager::new(state_root.clone(), Arc::clone(&manifest)).unwrap();
+        let views = ViewManager::new(
+            state_root.clone(),
+            resource_root.clone(),
+            Arc::clone(&manifest),
+        )
+        .unwrap();
         let sidecar = SidecarSupervisor::new(state_root.clone(), Arc::clone(&manifest)).unwrap();
         let installer = InstallManager::new(
             temp.path().join("source.app"),

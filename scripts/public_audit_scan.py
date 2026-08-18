@@ -27,13 +27,18 @@ DEFAULT_SKIP_DIRS = {
     ".playwright-browsers",
     ".pytest_cache",
     ".runtime-cache",
+    ".signing-keys",
     ".venv",
     ".worktrees",
     "__pycache__",
+    # 本地构建产物与运行状态（均被 .gitignore 排除，不进入发布源码树）
+    "build",
     "dist",
     "downloads",
     "node_modules",
+    "resources",
     "target",
+    "updates",
 }
 FORBIDDEN_SUFFIXES = {
     ".app",
@@ -115,7 +120,9 @@ def _safe_placeholder(value: str) -> bool:
 
 def _safe_public_literal(value: str, line: str) -> bool:
     """Suppress values that are public integrity material or obvious repo paths."""
-    if re.search(r"(?i)[\"']signature[\"']\s*:", line):
+    # "signature": "..." 与 *signature = "..." 都是公开完整性材料（签名/校验和
+    # 本就随清单分发），不是机密
+    if re.search(r"(?i)[\"']?signature[\"']?\s*[:=]", line):
         return True
     if "/" not in value:
         return False
@@ -247,6 +254,8 @@ def _git_blob_records(repo: Path) -> Iterator[tuple[str, int, str]]:
         check=True,
         stdout=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     ).stdout
     checked = subprocess.run(
         ["git", "cat-file", "--batch-check=%(objectname) %(objecttype) %(objectsize) %(rest)"],
@@ -255,6 +264,8 @@ def _git_blob_records(repo: Path) -> Iterator[tuple[str, int, str]]:
         input=objects,
         stdout=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     ).stdout
     for line in checked.splitlines():
         parts = line.split(" ", 3)
@@ -313,6 +324,8 @@ def scan_git_history(
         check=True,
         stdout=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
+        errors="replace",
     ).stdout
     for row in author_emails.splitlines():
         commit, _, email = row.partition("\t")

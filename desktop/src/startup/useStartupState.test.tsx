@@ -30,6 +30,7 @@ function fakeBridge(overrides: Partial<StartupBridge> = {}): StartupBridge {
     subscribe: vi.fn().mockResolvedValue(() => undefined),
     retry: vi.fn().mockResolvedValue(undefined),
     openLogs: vi.fn().mockResolvedValue(undefined),
+    openConsole: vi.fn().mockResolvedValue(undefined),
     markInteractive: vi.fn().mockResolvedValue(undefined),
     ...overrides,
   };

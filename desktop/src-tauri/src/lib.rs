@@ -1,26 +1,20 @@
 pub mod fault_injection;
 pub mod install;
 pub mod manifest;
+pub mod platform;
 pub mod runtime;
 pub mod sidecar;
 pub mod startup;
 
 use std::{
     error::Error,
-    ffi::OsStr,
-    fs::{self, File},
-    io::Write,
-    path::{Component, Path, PathBuf},
+    fs,
+    path::{Path, PathBuf},
     process::Command,
     sync::Arc,
     time::Instant,
 };
 
-use rustix::{
-    fd::OwnedFd,
-    fs::{fstat, mkdirat, open, openat, FileType, Mode, OFlags, Stat},
-    io::Errno,
-};
 use startup::{
     metrics::{StartupMetricEvent, StartupMetrics},
     model::{RetryStage, StartupSnapshot},
@@ -55,16 +49,7 @@ async fn retry_startup_stage(
 #[tauri::command]
 fn open_startup_log(state_root: tauri::State<'_, StateRoot>) -> Result<(), String> {
     let log_path = prepare_startup_log(&state_root.0)?;
-
-    let reveal_args = [OsStr::new("-R"), log_path.as_os_str()];
-    let status = Command::new("/usr/bin/open")
-        .args(reveal_args)
-        .status()
-        .map_err(|_| "startup_log_open_failed".to_string())?;
-    if !status.success() {
-        return Err("startup_log_open_failed".to_string());
-    }
-    Ok(())
+    crate::platform::reveal::reveal_path(&log_path)
 }
 
 #[tauri::command]
@@ -82,22 +67,56 @@ async fn open_legacy_console(
         return Ok(());
     }
     let connection = sidecar.connection().await.ok_or("sidecar_not_ready")?;
+    // 健康门通过到窗口真正导航之间仍有竞态（runner 刚死/端口未就绪），
+    // WebView2 对拒绝连接只显示死胡同错误页；创建窗口前先确认端口可连。
+    let mut probe_ok = false;
+    for _ in 0..10 {
+        match tokio::net::TcpStream::connect(("127.0.0.1", connection.port())).await {
+            Ok(_) => {
+                probe_ok = true;
+                break;
+            }
+            Err(_) => tokio::time::sleep(std::time::Duration::from_millis(300)).await,
+        }
+    }
+    if !probe_ok {
+        return Err("sidecar_not_ready".into());
+    }
     let url = tauri::Url::parse(&format!(
         "http://127.0.0.1:{}/monitor#session={}",
         connection.port(),
         connection.token()
     ))
     .map_err(|error| format!("legacy_url_invalid:{error}"))?;
-    WebviewWindowBuilder::new(&app, "legacy", WebviewUrl::External(url))
-        .title("数据科学家 · 兼容控制台")
+    let mut console_builder = WebviewWindowBuilder::new(&app, "legacy", WebviewUrl::External(url))
+        .title("数据科学家");
+    // Windows：正式界面窗口启动即最大化（与启动页一致）。
+    #[cfg(windows)]
+    {
+        console_builder = console_builder.maximized(true);
+    }
+    console_builder
         .on_new_window(|url, _features| {
             if should_open_in_system_browser(&url) {
+                // macOS 用 open；Windows 用 FileProtocolHandler 打开默认浏览器——
+                // explorer.exe 解析不了带 ?/& 查询参数的 URL，会退化成打开文件夹。
+                #[cfg(unix)]
                 let _ = Command::new("/usr/bin/open").arg(url.as_str()).spawn();
+                #[cfg(windows)]
+                let _ = Command::new("rundll32.exe")
+                    .args(["url.dll,FileProtocolHandler", url.as_str()])
+                    .spawn();
             }
             tauri::webview::NewWindowResponse::Deny
         })
         .build()
         .map_err(|error| error.to_string())?;
+    // 单窗口体验：正式界面窗口就位后关闭启动页窗口，视觉上是同一窗口
+    // 原地从“正在启动”切换为正式应用。顺序必须先建后关——全部窗口
+    // 关闭会触发应用退出。
+    if let Some(startup) = app.get_webview_window("main") {
+        let _ = startup.close();
+    }
     Ok(())
 }
 
@@ -109,7 +128,9 @@ fn should_open_in_system_browser(url: &tauri::Url) -> bool {
         || host.ends_with(".feishu.cn")
         || host == "larkoffice.com"
         || host.ends_with(".larkoffice.com");
-    url.scheme() == "https" && feishu_host
+    let local_excel =
+        matches!(host, "127.0.0.1" | "localhost" | "::1") && url.path() == "/download-excel";
+    (url.scheme() == "https" && feishu_host) || (url.scheme() == "http" && local_excel)
 }
 
 #[cfg(test)]
@@ -117,10 +138,12 @@ mod external_url_tests {
     use super::should_open_in_system_browser;
 
     #[test]
-    fn allows_feishu_only() {
+    fn allows_feishu_and_local_excel_only() {
         for url in [
             "https://accounts.feishu.cn/oauth/v1/device/verify?user_code=TEST",
             "https://tenant.larkoffice.com/base/test",
+            "http://127.0.0.1:8811/download-excel?file=all",
+            "http://localhost:8811/download-excel?file=bilibili",
         ] {
             assert!(
                 should_open_in_system_browser(&tauri::Url::parse(url).unwrap()),
@@ -131,8 +154,6 @@ mod external_url_tests {
             "http://accounts.feishu.cn/oauth/v1/device/verify",
             "https://feishu.cn.evil.example/path",
             "http://127.0.0.1:8811/config",
-            "http://127.0.0.1:8811/download-excel?file=all",
-            "http://localhost:8811/download-excel?file=bilibili",
             "https://example.com/download-excel",
         ] {
             assert!(
@@ -143,10 +164,12 @@ mod external_url_tests {
     }
 }
 
+#[cfg(unix)]
 fn prepare_startup_log(app_data: &Path) -> Result<PathBuf, String> {
     prepare_startup_log_with_hook(app_data, || {})
 }
 
+#[cfg(unix)]
 fn prepare_startup_log_with_hook<F>(
     app_data: &Path,
     after_downloads_open: F,
@@ -174,10 +197,12 @@ where
     Ok(app_data.join("downloads").join(RUNNER_LOG_NAME))
 }
 
+#[cfg(unix)]
 fn ensure_real_directory(path: &Path) -> Result<(), String> {
     open_real_directory_path(path, true).map(|_| ())
 }
 
+#[cfg(unix)]
 fn open_real_directory_path(path: &Path, create_missing: bool) -> Result<OwnedFd, String> {
     if path.as_os_str().is_empty() {
         return Err(log_prepare_error());
@@ -211,6 +236,7 @@ fn open_real_directory_path(path: &Path, create_missing: bool) -> Result<OwnedFd
     Ok(current)
 }
 
+#[cfg(unix)]
 fn open_or_create_startup_log(downloads_fd: &OwnedFd) -> Result<File, String> {
     let create_flags =
         OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
@@ -245,6 +271,7 @@ fn open_or_create_startup_log(downloads_fd: &OwnedFd) -> Result<File, String> {
     Ok(log_file)
 }
 
+#[cfg(unix)]
 fn validate_visible_log_identity(
     app_data: &Path,
     app_fd: &OwnedFd,
@@ -274,18 +301,21 @@ fn validate_visible_log_identity(
     require_same_file_identity(log_file, &visible_log)
 }
 
+#[cfg(unix)]
 fn require_same_identity(left: &OwnedFd, right: &OwnedFd) -> Result<(), String> {
     let left_stat = fstat(left).map_err(|_| log_prepare_error())?;
     let right_stat = fstat(right).map_err(|_| log_prepare_error())?;
     require_matching_stat(&left_stat, &right_stat)
 }
 
+#[cfg(unix)]
 fn require_same_file_identity(left: &File, right: &File) -> Result<(), String> {
     let left_stat = fstat(left).map_err(|_| log_prepare_error())?;
     let right_stat = fstat(right).map_err(|_| log_prepare_error())?;
     require_matching_stat(&left_stat, &right_stat)
 }
 
+#[cfg(unix)]
 fn require_matching_stat(left: &Stat, right: &Stat) -> Result<(), String> {
     if left.st_dev != right.st_dev || left.st_ino != right.st_ino {
         return Err(log_prepare_error());
@@ -293,6 +323,7 @@ fn require_matching_stat(left: &Stat, right: &Stat) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn require_file_type(stat: &Stat, expected: FileType) -> Result<(), String> {
     if FileType::from_raw_mode(stat.st_mode) != expected {
         return Err(log_prepare_error());
@@ -300,18 +331,22 @@ fn require_file_type(stat: &Stat, expected: FileType) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn directory_open_flags() -> OFlags {
     OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC
 }
 
+#[cfg(unix)]
 fn existing_log_open_flags() -> OFlags {
     OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK
 }
 
+#[cfg(unix)]
 fn log_prepare_error() -> String {
     "startup_log_prepare_failed".to_string()
 }
 
+#[cfg(unix)]
 fn containing_app(executable: &Path) -> Option<PathBuf> {
     executable
         .ancestors()
@@ -319,25 +354,72 @@ fn containing_app(executable: &Path) -> Option<PathBuf> {
         .map(Path::to_path_buf)
 }
 
+/// Windows：启动日志准备（downloads 目录 + runner 日志文件）。
+/// 不做 fd 锚定校验（无 dir_fd 语义），依赖唯一文件名与默认 ACL。
+#[cfg(windows)]
+fn prepare_startup_log(app_data: &Path) -> Result<PathBuf, String> {
+    use std::fs::OpenOptions;
+    use std::io::Write;
+
+    let downloads = app_data.join("downloads");
+    std::fs::create_dir_all(&downloads).map_err(|_| log_prepare_error())?;
+    let log_path = downloads.join(RUNNER_LOG_NAME);
+    let mut created = false;
+    match OpenOptions::new().write(true).create_new(true).open(&log_path) {
+        Ok(mut handle) => {
+            created = true;
+            handle
+                .write_all(b"startup logging initialized\n")
+                .map_err(|_| log_prepare_error())?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(_) => return Err(log_prepare_error()),
+    }
+    if !created && !log_path.is_file() {
+        return Err(log_prepare_error());
+    }
+    Ok(log_path)
+}
+
+#[cfg(windows)]
+fn ensure_real_directory(path: &Path) -> Result<(), String> {
+    std::fs::create_dir_all(path).map_err(|_| log_prepare_error())
+}
+
+#[cfg(windows)]
+fn log_prepare_error() -> String {
+    "startup_log_prepare_failed".to_string()
+}
+
+/// Windows：应用负载目录在 resources/ 子目录下（tauri 资源映射约定）。
+fn payload_dir(resource_dir: &Path) -> PathBuf {
+    #[cfg(windows)]
+    {
+        resource_dir.join("resources")
+    }
+    #[cfg(not(windows))]
+    {
+        resource_dir.to_path_buf()
+    }
+}
+
 fn setup_desktop(app: &mut tauri::App, process_started: Instant) -> Result<(), Box<dyn Error>> {
     let resource_dir = app.path().resource_dir()?;
-    let manifest_bytes = fs::read(resource_dir.join("package_manifest.json"))?;
-    let key_bundle_bytes = fs::read(resource_dir.join("scripts/package_public_keys.json"))?;
+    let payload = payload_dir(&resource_dir);
+    let manifest_bytes = fs::read(payload.join("package_manifest.json"))?;
+    let key_bundle_bytes = fs::read(payload.join("scripts/package_public_keys.json"))?;
     let manifest = Arc::new(VerifiedPackageManifest::from_signed(
         &manifest_bytes,
         &key_bundle_bytes,
     )?);
     let faults = fault_injection::from_env();
-    let home = PathBuf::from(
-        std::env::var_os("HOME").ok_or_else(|| std::io::Error::other("home_missing"))?,
-    );
-    let state_root = faults.state_root.clone().unwrap_or_else(|| {
-        home.join("Library/Application Support/数据科学家")
-            .join(&manifest.manifest().package_id)
-    });
+    let state_root = match faults.state_root.clone() {
+        Some(explicit) => explicit,
+        None => platform::env_paths::app_state_root("数据科学家", &manifest.manifest().package_id)
+            .map_err(|error| std::io::Error::other(format!("state_root_missing:{error}")))?,
+    };
     ensure_real_directory(&state_root).map_err(std::io::Error::other)?;
-    let source_app = containing_app(&std::env::current_exe()?)
-        .unwrap_or_else(|| home.join("Applications/数据科学家 Community.app"));
+    let source_app = source_app_path()?;
 
     let metrics = StartupMetrics::new(state_root.join("startup-metrics.jsonl"), process_started)
         .map_err(std::io::Error::other)?;
@@ -347,16 +429,21 @@ fn setup_desktop(app: &mut tauri::App, process_started: Instant) -> Result<(), B
     let store = StartupStore::default();
     let runtimes = RuntimeManager::new(
         state_root.clone(),
-        resource_dir.join("runtime-packs"),
+        payload.join("runtime-packs"),
         Arc::clone(&manifest),
         faults.clone(),
     )
     .map_err(std::io::Error::other)?;
-    let views = ViewManager::new(state_root.clone(), Arc::clone(&manifest))
+    let views = ViewManager::new(state_root.clone(), payload.clone(), Arc::clone(&manifest))
         .map_err(std::io::Error::other)?;
     let sidecar = SidecarSupervisor::new(state_root.clone(), Arc::clone(&manifest))
         .map_err(std::io::Error::other)?;
-    let installer = InstallManager::new(source_app, home, Arc::clone(&manifest), faults);
+    let installer = InstallManager::new(
+        source_app,
+        state_root.clone(),
+        Arc::clone(&manifest),
+        faults,
+    );
     let orchestrator = Arc::new(StartupOrchestrator::new(StartupDependencies {
         events: Arc::new(TauriStartupEventSink::new(app.handle().clone())),
         store: store.clone(),
@@ -373,14 +460,61 @@ fn setup_desktop(app: &mut tauri::App, process_started: Instant) -> Result<(), B
     app.manage(metrics);
     app.manage(sidecar);
     app.manage(Arc::clone(&orchestrator));
+    // Windows：主窗口启动即最大化，免去每次手动放大。
+    #[cfg(windows)]
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.maximize();
+    }
     orchestrator.launch();
     Ok(())
+}
+
+/// macOS：当前 exe 所属 .app；缺失时回退 ~/Applications 默认安装位。
+#[cfg(unix)]
+fn source_app_path() -> Result<PathBuf, Box<dyn Error>> {
+    let home = PathBuf::from(
+        std::env::var_os("HOME").ok_or_else(|| std::io::Error::other("home_missing"))?,
+    );
+    Ok(containing_app(&std::env::current_exe()?)
+        .unwrap_or_else(|| home.join("Applications/数据科学家 Community.app")))
+}
+
+/// Windows：NSIS 已安装到位，source 即 exe 所在目录。
+#[cfg(windows)]
+fn source_app_path() -> Result<PathBuf, Box<dyn Error>> {
+    let exe = std::env::current_exe()?;
+    Ok(exe
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| PathBuf::from(".")))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let process_started = Instant::now();
+
     let app = tauri::Builder::default()
+        // 单实例保护：重复启动时聚焦已有窗口并退出新进程，
+        // 避免第二个实例抢 sidecar 锁后以降级态启动（用户会看到
+        // “被其他程序控制”类错误）。
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            for label in ["legacy", "main"] {
+                if let Some(window) = app.get_webview_window(label) {
+                    let _ = window.unminimize();
+                    let _ = window.show();
+                    // Windows 前台限制下 set_focus 可能只闪任务栏不抬窗；
+                    // 短暂置顶再取消可强制把窗口带到最前。
+                    #[cfg(windows)]
+                    {
+                        let _ = window.set_always_on_top(true);
+                        let _ = window.set_focus();
+                        let _ = window.set_always_on_top(false);
+                    }
+                    #[cfg(not(windows))]
+                    let _ = window.set_focus();
+                }
+            }
+        }))
         .invoke_handler(tauri::generate_handler![
             get_startup_snapshot,
             retry_startup_stage,
@@ -402,7 +536,8 @@ pub fn run() {
     });
 }
 
-#[cfg(test)]
+// 测试基于 symlink/权限位等 Unix 语义，Windows 下跳过
+#[cfg(all(test, unix))]
 mod tests {
     use std::{
         fs,

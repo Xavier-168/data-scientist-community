@@ -153,8 +153,15 @@ function pidExists(pid) {
   }
 }
 
+const IS_WINDOWS = process.platform === 'win32';
+
 function signalProcessGroup(pid, signal) {
   if (!pid) return;
+  if (IS_WINDOWS) {
+    // Windows 无进程组信号；taskkill /T /F 连同 npm/node 整树终止
+    execFile('taskkill', ['/T', '/F', '/PID', String(pid)], () => {});
+    return;
+  }
   try {
     process.kill(-pid, signal);
   } catch (error) {
@@ -276,17 +283,62 @@ async function cleanupVite(
   );
 }
 
+async function listPidParentPidRows() {
+  const maxBuffer = 4 * 1024 * 1024;
+  if (IS_WINDOWS) {
+    // wmic CSV 每行 "Node,ParentProcessId,ProcessId"；wmic 缺失时回退 PowerShell
+    try {
+      const { stdout } = await execFileAsync(
+        'wmic',
+        ['process', 'get', 'ProcessId,ParentProcessId', '/format:csv'],
+        { maxBuffer, windowsHide: true },
+      );
+      const rows = [];
+      for (const line of stdout.split('\n')) {
+        const fields = line.trim().split(',');
+        if (fields.length < 3) continue;
+        const ppid = Number(fields[fields.length - 2]);
+        const pid = Number(fields[fields.length - 1]);
+        if (Number.isInteger(pid) && pid > 0 && Number.isInteger(ppid)) {
+          rows.push([pid, ppid]);
+        }
+      }
+      return rows;
+    } catch {
+      const { stdout } = await execFileAsync(
+        'powershell.exe',
+        [
+          '-NoProfile',
+          '-NonInteractive',
+          '-Command',
+          '[Console]::OutputEncoding=[System.Text.Encoding]::UTF8; Get-CimInstance Win32_Process | ForEach-Object { "{0},{1}" -f $_.ProcessId, $_.ParentProcessId }',
+        ],
+        { maxBuffer, windowsHide: true },
+      );
+      const rows = [];
+      for (const line of stdout.split('\n')) {
+        const match = line.trim().match(/^(\d+),(\d+)$/);
+        if (match) rows.push([Number(match[1]), Number(match[2])]);
+      }
+      return rows;
+    }
+  }
+  const { stdout } = await execFileAsync('/bin/ps', ['-axo', 'pid=,ppid='], {
+    maxBuffer,
+  });
+  const rows = [];
+  for (const line of stdout.split('\n')) {
+    const match = line.match(/^\s*(\d+)\s+(\d+)\s*$/);
+    if (match) rows.push([Number(match[1]), Number(match[2])]);
+  }
+  return rows;
+}
+
 async function listProcessTreePids(rootPid) {
   try {
-    const { stdout } = await execFileAsync('/bin/ps', ['-axo', 'pid=,ppid='], {
-      maxBuffer: 4 * 1024 * 1024,
-    });
+    const rows = await listPidParentPidRows();
     const children = new Map();
-    for (const line of stdout.split('\n')) {
-      const match = line.match(/^\s*(\d+)\s+(\d+)\s*$/);
-      if (!match) continue;
-      const pid = Number(match[1]);
-      const parentPid = Number(match[2]);
+    for (const [pid, parentPid] of rows) {
       const siblings = children.get(parentPid) ?? [];
       siblings.push(pid);
       children.set(parentPid, siblings);
@@ -475,10 +527,19 @@ async function runSmokeAttempt(executablePath, { occupyPort = false } = {}) {
   }
 
   let child;
+  // Windows 上 npm 是 npm.cmd，Node 无 shell 的 spawn 无法直接执行
+  // （ENOENT/EINVAL）；与 runner 的 COMSPEC 包装保持一致
+  const npmCommand = IS_WINDOWS
+    ? {
+        file: process.env.ComSpec || 'cmd.exe',
+        prefixArgs: ['/d', '/s', '/c', 'npm'],
+      }
+    : { file: 'npm', prefixArgs: [] };
   try {
     child = spawn(
-      'npm',
+      npmCommand.file,
       [
+        ...npmCommand.prefixArgs,
         '--prefix',
         'desktop',
         'run',

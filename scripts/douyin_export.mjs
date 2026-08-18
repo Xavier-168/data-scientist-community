@@ -264,6 +264,21 @@ function newProgressState() {
 
 let progressState = newProgressState();
 
+async function renameWithBusyRetry(tmpPath, targetPath) {
+  // Windows 上目标正被 Python supervisor 轮询读取时 rename 抛 EPERM，短暂重试
+  for (let attempt = 0; ; attempt += 1) {
+    try {
+      await fs.rename(tmpPath, targetPath);
+      return;
+    } catch (error) {
+      const code = error && error.code;
+      const retryable = code === 'EPERM' || code === 'EACCES' || code === 'EBUSY';
+      if (!retryable || attempt >= 3) throw error;
+      await new Promise((resolve) => setTimeout(resolve, 120));
+    }
+  }
+}
+
 async function updateProgress(patch = {}) {
   progressState = {
     ...progressState,
@@ -272,9 +287,9 @@ async function updateProgress(patch = {}) {
     headless: CONFIG.headless,
   };
   await ensureDir(path.dirname(CONFIG.progressPath));
-  const tmpPath = CONFIG.progressPath + '.tmp';
+  const tmpPath = `${CONFIG.progressPath}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
   await fs.writeFile(tmpPath, JSON.stringify(progressState, null, 2), 'utf-8');
-  await fs.rename(tmpPath, CONFIG.progressPath);
+  await renameWithBusyRetry(tmpPath, CONFIG.progressPath);
 }
 
 async function cleanProfileLocks(profileDir) {

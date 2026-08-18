@@ -71,6 +71,17 @@ const tempDirectory = await mkdtemp(join(tmpdir(), 'rust-tool-signal-'));
 const fakeRustup = join(tempDirectory, 'rustup');
 const groupPidFile = join(tempDirectory, 'group.pid');
 const childPidFile = join(tempDirectory, 'child.pid');
+
+if (process.platform === 'win32') {
+  // 信号转发与进程组清理断言基于 POSIX（SIGHUP、process.kill(-pid)、/bin/sh
+  // trap）。Windows 下 run_rust_tool.mjs 走 taskkill/直接子进程路径，
+  // 该语义由 Rust 侧 platform::process 测试覆盖。
+  process.stdout.write('rust_tool_signal_cleanup: skipped on win32\n');
+} else {
+await main();
+}
+
+async function main() {
 const fakeRustupSource = `#!/bin/sh
 if [ "$1" = "which" ]; then
   printf '/usr/bin/true\\n'
@@ -130,4 +141,5 @@ try {
     } catch {}
   }
   await rm(tempDirectory, { recursive: true, force: true });
+}
 }

@@ -45,7 +45,10 @@ class ExcelExportDialogTests(unittest.TestCase):
             stdout="/tmp/community-user/Downloads/数据汇总.xlsx\n",
             stderr="",
         )
-        with patch.object(runner.subprocess, "run", return_value=completed) as run:
+        with (
+            patch("sys.platform", "darwin"),
+            patch.object(runner.subprocess, "run", return_value=completed) as run,
+        ):
             result = runner._run_excel_save_dialog("../../unsafe/name.xlsx")
 
         self.assertTrue(result["ok"])
@@ -63,12 +66,23 @@ class ExcelExportDialogTests(unittest.TestCase):
             stdout="",
             stderr="execution error: User canceled. (-128)\n",
         )
-        with patch.object(runner.subprocess, "run", return_value=completed):
+        with (
+            patch("sys.platform", "darwin"),
+            patch.object(runner.subprocess, "run", return_value=completed),
+        ):
             result = runner._run_excel_save_dialog("all_channels_enriched.xlsx")
 
         self.assertTrue(result["ok"])
         self.assertTrue(result["cancelled"])
         self.assertNotIn("path", result)
+
+    def test_native_save_dialog_unsupported_platform_returns_error(self):
+        with patch("sys.platform", "win32"):
+            result = runner._run_excel_save_dialog("all_channels_enriched.xlsx")
+
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["cancelled"])
+        self.assertEqual(result["error"], "excel_save_dialog_unsupported")
 
     def test_excel_copy_adds_extension_and_replaces_atomically(self):
         with tempfile.TemporaryDirectory(prefix="excel-save-test-") as temp_dir:

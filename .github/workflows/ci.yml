@@ -100,3 +100,75 @@ jobs:
           --root .
           --git-history
           --fail-on low
+
+  test-windows:
+    name: Windows portable suite
+    runs-on: windows-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Check out source with full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Set up Node.js 22.14
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.14.0"
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            desktop/package-lock.json
+
+      - name: Set up Rust stable (MSVC)
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Install Python dependencies
+        shell: bash
+        run: |
+          python -m venv .venv
+          .venv/Scripts/python -m pip install --upgrade pip
+          .venv/Scripts/python -m pip install -r requirements.txt
+
+      - name: Install Node and browser dependencies
+        shell: bash
+        run: |
+          npm ci
+          npm ci --prefix desktop
+          npx playwright install chromium
+
+      - name: Run portable test suite
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
+          YIRENGONGIS_STATE_DIR: ${{ runner.temp }}/community-state
+        shell: bash
+        run: |
+          npm run test:public
+          npm run test:frontend
+          npm run test:python
+          npm run test:desktop:web
+          npm run test:desktop:build
+          # Windows 侧 Rust 测试：lib 单测（进程所有权类用例依赖 Unix 语义，跳过）
+          node scripts/run_rust_tool.mjs cargo test \
+            --manifest-path desktop/src-tauri/Cargo.toml \
+            --locked \
+            --all-features \
+            --lib \
+            -- \
+            --skip 'sidecar::tests::'
+          npm run test:desktop:smoke
+
+      - name: Scan working tree
+        shell: bash
+        run: >-
+          .venv/Scripts/python scripts/public_audit_scan.py
+          --root .
+          --fail-on low

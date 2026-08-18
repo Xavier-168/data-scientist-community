@@ -25,6 +25,19 @@ _SELF_DIR = os.path.dirname(os.path.abspath(__file__))
 if _SELF_DIR not in sys.path:
     sys.path.insert(0, _SELF_DIR)
 
+# 打包态 sidecar 不注入 PYTHONUTF8；stdout 管道默认 ANSI 代码页（中文系统
+# GBK），而 Node 采集器按 utf-8 解析 Python 子进程的 JSON 输出。与源码态
+# start_monitor 对齐，统一子进程 stdio 编码，避免中文键值静默乱码。
+os.environ.setdefault("PYTHONUTF8", "1")
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+for _stream in (sys.stdout, sys.stderr):
+    _reconfigure = getattr(_stream, "reconfigure", None)
+    if callable(_reconfigure):
+        try:
+            _reconfigure(encoding="utf-8", errors="replace")
+        except (OSError, ValueError):
+            pass
+
 from analytics_engine import archive_snapshot_from_excel, compute_dashboard, list_recent_runs
 from client_license import LICENSE_VERIFY_CACHE_TTL_SECONDS, LicenseManager
 from feedback_manager import send_feedback
@@ -86,7 +99,17 @@ def _default_playwright_browsers_dir() -> str:
     bundled = os.path.join(BASE_DIR, "runtime", "playwright-browsers")
     if os.path.isdir(bundled):
         return bundled
-    return os.path.join(STATE_DIR, ".playwright-browsers")
+    state_browsers = os.path.join(STATE_DIR, ".playwright-browsers")
+    if os.path.isdir(state_browsers):
+        return state_browsers
+    if os.name == "nt":
+        # Playwright 每用户默认注册表（npx playwright install 的默认落点）。
+        local_app_data = str(os.environ.get("LOCALAPPDATA", "") or "").strip()
+        if local_app_data:
+            default_registry = os.path.join(local_app_data, "ms-playwright")
+            if os.path.isdir(default_registry):
+                return default_registry
+    return state_browsers
 
 RUNNER_HOST = os.environ.get("YIRENGONGIS_RUNNER_HOST", "127.0.0.1")
 RUNNER_PORT = int(os.environ.get("YIRENGONGIS_RUNNER_PORT", "8811"))
@@ -156,12 +179,22 @@ end run
 
 def _run_excel_save_dialog(default_filename: str) -> dict:
     """Open the native macOS Save As panel without interpolating user text into AppleScript."""
+    if sys.platform != "darwin":
+        # Windows/Linux 前端走浏览器 showSaveFilePicker，macOS 原生面板不适用
+        return {
+            "ok": False,
+            "cancelled": False,
+            "error": "excel_save_dialog_unsupported",
+            "message": "当前平台不支持原生保存窗口，请使用页面内保存。",
+        }
     safe_name = os.path.basename(str(default_filename or "数据汇总.xlsx").strip()) or "数据汇总.xlsx"
     try:
         completed = subprocess.run(
             ["/usr/bin/osascript", "-e", _EXCEL_SAVE_DIALOG_SCRIPT, safe_name],
             capture_output=True,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=600,
             check=False,
         )
@@ -803,7 +836,9 @@ DEFAULT_CONFIG = {
     "workspace_name": "本地数据工作台",
     "min_publish_date": "2026-01-01",
     "browser_channel": _detect_default_browser_channel(),
-    "enabled_platforms": [],
+    # 首启默认启用全部平台：初始化向导的"一键授权所选平台"开箱即用，
+    # 否则空列表会让按钮静默早退（仅短暂 toast），用户以为没反应
+    "enabled_platforms": list(VALID_PLATFORM_IDS),
     "onboarding_completed": False,
     "feishu_enabled": False,
     "feishu_auto_sync": False,
@@ -3064,6 +3099,7 @@ def _profile_browser_pids(profile_dir: str) -> list[int]:
         output = subprocess.check_output(
             ["ps", "-axo", "pid=,command="],
             text=True,
+            encoding="utf-8",
             errors="replace",
             timeout=3,
         )
@@ -4173,7 +4209,19 @@ def _run_lark_cli_raw(args: list[str], timeout: int = 120, use_global: bool | No
     cmd = _resolve_lark_cli_prefix() + args
     env = _lark_cli_env(use_global=use_global)
 
-    proc = subprocess.run(cmd, cwd=LARK_CLI_DIR, env=env, capture_output=True, text=True, timeout=timeout)
+    # lark-cli 输出 UTF-8 JSON（含中文账号名）；Windows 下 text=True 默认
+    # GBK 解码会在特定字节序列上崩溃（reader 线程 UnicodeDecodeError，
+    # 调用挂起/误报缺权限），必须显式 UTF-8。
+    proc = subprocess.run(
+        cmd,
+        cwd=LARK_CLI_DIR,
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=timeout,
+    )
     return (proc.stdout or "").strip(), (proc.stderr or "").strip(), proc.returncode
 
 
@@ -4250,17 +4298,25 @@ def _lark_cli_status(
             cached = _LARK_CLI_STATUS_CACHE.get(cache_key)
             if cached and now - float(cached.get("ts") or 0) < LARK_CLI_STATUS_CACHE_TTL_SECONDS:
                 return dict(cached.get("value") or {})
-    try:
-        stdout, stderr, rc = _run_lark_cli_raw(["auth", "status"], timeout=timeout, use_global=effective_global)
-    except Exception:
-        return {}
-    for payload_text in (stdout, stderr):
-        payload = _parse_lark_cli_status_payload(payload_text)
-        if payload:
-            if rc == 0 or isinstance(payload.get("identities"), dict):
+    # lark-cli 冷启动（版本检查网络请求、杀软扫描）偶发超时或输出异常，
+    # 返回空会被上层误判为“未登录/缺权限”——失败时空结果重试一次。
+    for attempt in range(2):
+        try:
+            stdout, stderr, rc = _run_lark_cli_raw(["auth", "status"], timeout=timeout, use_global=effective_global)
+        except Exception:
+            if attempt == 0:
+                time.sleep(1.5)
+                continue
+            return {}
+        for payload_text in (stdout, stderr):
+            payload = _parse_lark_cli_status_payload(payload_text)
+            if payload and (rc == 0 or isinstance(payload.get("identities"), dict)):
                 with _LARK_CLI_STATUS_CACHE_LOCK:
                     _LARK_CLI_STATUS_CACHE[cache_key] = {"ts": time.time(), "value": dict(payload)}
                 return dict(payload)
+        if attempt == 0:
+            time.sleep(1.5)
+            continue
     return {}
 
 
@@ -4365,11 +4421,18 @@ def _feishu_bitable_url(app_token: str) -> str:
 
 
 def _lark_cli_auth_list_text(use_global: bool | None = None) -> str:
-    try:
-        stdout, stderr, _rc = _run_lark_cli_raw(["auth", "list"], timeout=10, use_global=use_global)
-    except Exception:
-        return ""
-    return (stdout or stderr or "").strip()
+    # lark-cli 冷启动（网络版本检查、杀软扫描）可能超过 10s，
+    # 超时下限 20s 且失败重试一次，避免上层误判“未配置”。
+    for attempt in range(2):
+        try:
+            stdout, stderr, _rc = _run_lark_cli_raw(["auth", "list"], timeout=20, use_global=use_global)
+        except Exception:
+            if attempt == 0:
+                time.sleep(1.5)
+                continue
+            return ""
+        return (stdout or stderr or "").strip()
+    return ""
 
 
 def _feishu_effective_context(config: dict | None) -> dict:
@@ -4410,7 +4473,7 @@ def _feishu_effective_context(config: dict | None) -> dict:
     if not cli_mode:
         return context
 
-    status = _lark_cli_status(use_global=use_global, timeout=6)
+    status = _lark_cli_status(use_global=use_global, timeout=20)
     identities = status.get("identities") if isinstance(status, dict) else {}
     bot = identities.get("bot") if isinstance(identities, dict) else {}
     user = identities.get("user") if isinstance(identities, dict) else {}
@@ -4419,7 +4482,7 @@ def _feishu_effective_context(config: dict | None) -> dict:
     context["bot_available"] = bot_available
     context["user_available"] = user_available
     context["identity"] = "user" if user_available else ("bot" if bot_available else "none")
-    scope_state = _lark_cli_user_scope_state(required_scopes=FEISHU_USER_BASE_SCOPES, use_global=use_global, timeout=6)
+    scope_state = _lark_cli_user_scope_state(required_scopes=FEISHU_USER_BASE_SCOPES, use_global=use_global, timeout=20)
     context["user_scope_ready"] = bool(scope_state.get("has_required_scopes"))
     context["missing_user_scopes"] = list(scope_state.get("missing_scopes") or [])
     context["user_scopes"] = list(scope_state.get("scopes") or [])
@@ -4612,6 +4675,14 @@ def _start_lark_cli_user_auth(trigger_reason: str = "") -> dict:
     global _LARK_CLI_STATE
     with _LARK_CLI_LOCK:
         if _LARK_CLI_STATE.get("phase") in {"connecting", "scan_qr", "auth_waiting"} and _LARK_CLI_STATE.get("auth_mode") == "user":
+            # 已有授权流程在等扫码：用户此时点“重新生成授权链接”多半是
+            # 页面没弹出来——把现有授权页再拉起一次（仅 Windows）。
+            existing_url = str(_LARK_CLI_STATE.get("verification_url") or "").strip()
+            if existing_url and os.name == "nt":
+                try:
+                    os.startfile(existing_url)
+                except Exception:
+                    pass
             return {"ok": True, **dict(_LARK_CLI_STATE)}
         _LARK_CLI_STATE.update(
             {
@@ -4711,7 +4782,13 @@ def _run_lark_cli_user_auth_flow(
             }
         )
 
-    _open_trusted_feishu_verification_url(captured_url)
+    # macOS 走可信 CLI 验证页拉起；Windows（lark-cli 设备流返回的是
+    # accounts.feishu.cn 链接，macOS 白名单不匹配）用默认浏览器直接拉起。
+    if not _open_trusted_feishu_verification_url(captured_url) and os.name == "nt":
+        try:
+            os.startfile(captured_url)
+        except Exception:
+            pass
 
     complete_output = ""
     try:
@@ -4735,11 +4812,18 @@ def _run_lark_cli_user_auth_flow(
             raise RuntimeError(_friendly_lark_cli_auth_error("authorization timed out", trigger_reason=trigger_reason))
 
     _invalidate_lark_cli_caches()
-    scope_state = _lark_cli_user_scope_state(
-        required_scopes=cleaned_scopes,
-        use_global=use_global,
-        force_refresh=True,
-    )
+    # lark-cli 刚写完 token 就读 auth status，Windows 下偶发配置文件占用或
+    # 网络抖动导致查询失败（返回空），会被误判为未登录。重试几次再定论。
+    scope_state: dict = {}
+    for _attempt in range(3):
+        scope_state = _lark_cli_user_scope_state(
+            required_scopes=cleaned_scopes,
+            use_global=use_global,
+            force_refresh=True,
+        )
+        if scope_state.get("available"):
+            break
+        time.sleep(2)
     if not scope_state.get("available"):
         raise RuntimeError(_friendly_lark_cli_auth_error("not_logged_in", trigger_reason=trigger_reason))
     if cleaned_scopes and scope_state.get("missing_scopes"):
@@ -4853,7 +4937,7 @@ def _lark_cli_connect_worker(
         project_configured = _lark_cli_is_configured(use_global=False)
         project_ready = False
         if project_configured:
-            project_status = _lark_cli_status(use_global=False, timeout=8, force_refresh=True)
+            project_status = _lark_cli_status(use_global=False, timeout=20, force_refresh=True)
             identities = project_status.get("identities") if isinstance(project_status, dict) else {}
             bot = identities.get("bot") if isinstance(identities, dict) else {}
             user = identities.get("user") if isinstance(identities, dict) else {}
@@ -5001,20 +5085,30 @@ def _create_lark_cli_bitable_base(base_name: str) -> dict:
     name = _sanitize_workspace_name(base_name) or "自媒体数据分析"
     use_global = _saved_feishu_cli_use_global_home()
     if not _lark_cli_has_required_user_auth(use_global=use_global):
-        missing_scopes = _lark_cli_missing_required_user_scopes(use_global=use_global, timeout=8)
+        missing_scopes = _lark_cli_missing_required_user_scopes(use_global=use_global, timeout=20)
         raise RuntimeError(_required_user_scope_message(missing_scopes))
     identities = ["user"]
     last_error = ""
+    # 瞬时故障（冷启动超时/网络抖动）重试一次；“返回了但没拿到 token”不重试，避免重复建表
+    identity_attempts = 2
 
     for identity in identities:
-        try:
-            result = _run_lark_cli(
-                ["base", "+base-create", "--as", identity, "--name", name],
-                timeout=30,
-                use_global=use_global,
-            )
-        except Exception as exc:
-            last_error = str(exc)
+        result = None
+        for attempt in range(identity_attempts):
+            try:
+                result = _run_lark_cli(
+                    ["base", "+base-create", "--as", identity, "--name", name],
+                    timeout=30,
+                    use_global=use_global,
+                )
+                break
+            except Exception as exc:
+                last_error = str(exc)
+                result = None
+                if attempt < identity_attempts - 1:
+                    time.sleep(1.5)
+                    continue
+        if result is None:
             continue
 
         base_data = result.get("data", {}).get("base", {}) if isinstance(result, dict) else {}
@@ -5169,8 +5263,26 @@ def _terminate_process_tree(proc, *, requires_user_session: bool = False) -> Non
     poll = getattr(proc, "poll", None)
     if requires_user_session and callable(poll) and poll() is not None:
         return
+    if os.name == "nt":
+        # 已退出的进程不 taskkill：Windows 会积极复用 PID，对死 PID 整树
+        # 强杀可能误杀无关进程（含本应用自身）
+        if callable(poll) and poll() is not None:
+            return
+        # Windows 下 .cmd 包装使 proc.pid 指向 cmd.exe，proc.terminate() 只杀
+        # 壳进程，node 采集器与 Playwright 浏览器会变成孤儿并继续占用授权
+        # profile；taskkill /T /F 连同子孙进程整树终止（runner 是父进程不受影响）。
+        from core.process import terminate_pid_tree
+
+        terminate_pid_tree(proc.pid, grace_seconds=1.0)
+        wait = getattr(proc, "wait", None)
+        if callable(wait):
+            try:
+                wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                pass
+        return
     try:
-        if os.name != "nt" and not requires_user_session:
+        if not requires_user_session:
             # Batch jobs start with setsid(), so Popen.pid is also their PGID.
             # Kill the group even if the shell leader already exited while a
             # descendant still owns the inherited stdout/stderr pipes.
@@ -5184,7 +5296,7 @@ def _terminate_process_tree(proc, *, requires_user_session: bool = False) -> Non
     except Exception:
         pass
     try:
-        if os.name != "nt" and not requires_user_session:
+        if not requires_user_session:
             os.killpg(proc.pid, signal.SIGKILL)
         else:
             proc.kill()
@@ -5576,10 +5688,10 @@ class Handler(BaseHTTPRequestHandler):
             current_token = str(config.get("feishu_app_token") or "").strip()
             owner_identity = str(config.get("feishu_bitable_owner_identity") or "").strip()
             requires_user_owned_base = not current_token or owner_identity == "user"
-            if requires_user_owned_base and not _lark_cli_has_required_user_auth(use_global=use_global, timeout=8):
+            if requires_user_owned_base and not _lark_cli_has_required_user_auth(use_global=use_global, timeout=20):
                 reason = "initial_feishu_base_owner" if not current_token else "user_owned_base_sync"
                 _start_lark_cli_user_auth(reason)
-                missing_scopes = _lark_cli_missing_required_user_scopes(use_global=use_global, timeout=8)
+                missing_scopes = _lark_cli_missing_required_user_scopes(use_global=use_global, timeout=20)
                 raise RuntimeError(_required_user_scope_message(missing_scopes))
             try:
                 config, created_bitable = _ensure_feishu_cli_bitable_target(config)
@@ -5789,8 +5901,8 @@ class Handler(BaseHTTPRequestHandler):
             raise RuntimeError("飞书测试失败。CLI 模式需要 app_id 且 lark-cli 已登录；App 模式需要 app_token、app_id、app_secret。")
         if sync_mode == "cli" and not str(merged.get("feishu_app_token") or "").strip():
             use_global = _saved_feishu_cli_use_global_home(merged)
-            if not _lark_cli_has_required_user_auth(use_global=use_global, timeout=8):
-                missing_scopes = _lark_cli_missing_required_user_scopes(use_global=use_global, timeout=8)
+            if not _lark_cli_has_required_user_auth(use_global=use_global, timeout=20):
+                missing_scopes = _lark_cli_missing_required_user_scopes(use_global=use_global, timeout=20)
                 raise RuntimeError(_required_user_scope_message(missing_scopes))
             return {"ok": True, "message": "飞书 CLI 已连接；首次同步时会自动创建可编辑的多维表格。"}
 
@@ -6945,7 +7057,17 @@ class Handler(BaseHTTPRequestHandler):
             return ok, stdout, stderr
 
         browser_channel = _sanitize_browser_channel(query.get("browser_channel", [None])[0]) or _configured_browser_channel()
-        backup_dir = _backup_platform_profile(platform_id, browser_channel, reason="startup_failed")
+        try:
+            backup_dir = _backup_platform_profile(platform_id, browser_channel, reason="startup_failed")
+        except OSError as exc:
+            # Windows 上 profile 内文件句柄可能被崩溃残留的浏览器/杀软短暂
+            # 占用，shutil.move 失败不应让自动重建重试整体失效。
+            self._append_log(
+                f"{retry_log_title}_PROFILE_BACKUP_ERROR",
+                f"platform={platform_id}\nchannel={browser_channel}\nerror={exc}\n",
+                "",
+            )
+            return ok, stdout, stderr
         if not backup_dir:
             return ok, stdout, stderr
 
@@ -7177,6 +7299,28 @@ class Handler(BaseHTTPRequestHandler):
                     ),
                 }
 
+        # 单平台：enriched 与原始文件都不存在时按需重建（与 all 相同的
+        # 重建路径），避免采集后从未生成过单平台文件时导出 404。
+        if which != "all":
+            enriched_target = enriched_map.get(which, "")
+            raw_target = raw_map.get(which, "")
+            if enriched_target and not os.path.exists(enriched_target) and not os.path.exists(raw_target):
+                config = load_saved_config()
+                excel_cmd = [
+                    PYTHON_BIN,
+                    BUILD_EXCEL_SCRIPT,
+                    "--mode",
+                    which,
+                    "--output",
+                    enriched_target,
+                ]
+                chosen_min_date = str(config.get("min_publish_date") or DEFAULT_CONFIG["min_publish_date"]).strip()
+                if chosen_min_date:
+                    excel_cmd.extend(["--min-date", chosen_min_date])
+                rebuild_proc = self._run_script(excel_cmd, os.environ.copy(), timeout=180)
+                rebuild_stdout, rebuild_stderr = self._get_proc_output(rebuild_proc)
+                self._append_log("DOWNLOAD_EXCEL_REBUILD", rebuild_stdout, rebuild_stderr)
+
         target = enriched_map.get(which, "")
         if not target or not os.path.exists(target):
             target = raw_map.get(which, "")
@@ -7222,6 +7366,7 @@ class Handler(BaseHTTPRequestHandler):
         # --- 文件下载端点 ---
         if parsed.path == "/download-excel":
             qs = parse_qs(parsed.query)
+
             which = str(qs.get("file", ["all"])[0] or "all").strip()
             if which not in {"all", *VALID_PLATFORM_IDS}:
                 self._send_json(
@@ -7241,6 +7386,7 @@ class Handler(BaseHTTPRequestHandler):
                 "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
                 as_download=True,
             )
+
             return
 
         if parsed.path.startswith("/assets/"):
@@ -8272,7 +8418,12 @@ def _bind_runner_server(host: str, preferred_port: int, handler, *, allow_fallba
     try:
         return ThreadingHTTPServer((host, int(preferred_port)), handler)
     except OSError as exc:
-        address_in_use = exc.errno == errno.EADDRINUSE or getattr(exc, "winerror", None) == 10048
+        address_in_use = exc.errno == errno.EADDRINUSE or getattr(exc, "winerror", None) in (
+            # 10048 = WSAEADDRINUSE；Windows 的 SO_REUSEADDR 语义下，
+            # 绑定已被监听的端口也可能表现为 10013 (WSAEACCES)。
+            10048,
+            10013,
+        )
         if not allow_fallback or int(preferred_port) == 0 or not address_in_use:
             raise
     return ThreadingHTTPServer((host, 0), handler)
@@ -8295,22 +8446,13 @@ def _runner_ready_frame(server) -> str:
 
 
 def _runner_process_command(pid: int) -> str:
-    import subprocess as _sp
-    try:
-        result = _sp.run(
-            ["ps", "-p", str(pid), "-o", "command="],
-            capture_output=True,
-            text=True,
-            timeout=3,
-        )
-    except Exception:
-        return ""
-    return str(result.stdout or "").strip()
+    from core.process import process_command
+    return process_command(pid)
 
 
 def _is_current_product_runner_command(command: str) -> bool:
-    text = str(command or "")
-    expected = os.path.realpath(BASE_DIR)
+    text = str(command or "").replace("\\", "/")
+    expected = os.path.realpath(BASE_DIR).replace("\\", "/")
     return bool(
         expected in text
         and any(marker in text for marker in ("/scripts/_run.py", "/scripts/runner.py", "runner.cpython-"))
@@ -8322,58 +8464,56 @@ def _kill_stale_runner_processes():
 
     Only targets runner/_run.py processes that hold our port, to avoid
     killing unrelated processes.  Gives them 2 s to exit gracefully
-    before SIGKILL.
+    before force kill (Windows: taskkill /T /F on the tree).
     """
-    import subprocess as _sp
-    try:
-        result = _sp.run(
-            ["lsof", "-ti", f":{RUNNER_PORT}", "-sTCP:LISTEN"],
-            capture_output=True, text=True, timeout=3,
-        )
-        pids = [p.strip() for p in (result.stdout or "").splitlines() if p.strip()]
-    except Exception:
-        return
+    from core.process import port_listener_pids, terminate_pid_tree
+
+    pids = port_listener_pids(RUNNER_PORT)
     my_pid = os.getpid()
-    matched_pids = []
-    for pid_str in pids:
-        try:
-            pid = int(pid_str)
-        except ValueError:
-            continue
+    for pid in pids:
         if pid == my_pid:
             continue
         if not _is_current_product_runner_command(_runner_process_command(pid)):
             continue
-        matched_pids.append(pid)
-        try:
-            os.kill(pid, signal.SIGTERM)
-        except OSError:
-            continue
-    if matched_pids:
-        time.sleep(2)
-        for pid in matched_pids:
-            if not _is_current_product_runner_command(_runner_process_command(pid)):
-                continue
-            try:
-                os.kill(pid, 0)  # still alive?
-                os.kill(pid, signal.SIGKILL)
-            except OSError:
-                pass
+        terminate_pid_tree(pid)
 
 
 def _should_cleanup_stale_runners() -> bool:
+    # 监督态依赖 Job Object 保证“壳死即整树终止”，不做跨实例清理——
+    # 若两个实例同时运行，无条件清理会让双方 runner 互相重启乒乓。
     return not _is_tauri_supervised()
+
+
+def _exit_trace(text: str) -> None:
+    """退出原因追踪：诊断 runner 静默退出用，写状态目录 exit_trace.log。"""
+    try:
+        path = os.path.join(STATE_DIR, "exit_trace.log")
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} pid={os.getpid()} {text}\n")
+    except Exception:
+        pass
 
 
 def _start_server():
     """Entry point callable from compiled launcher (_run.py)."""
     ensure_runtime_dirs()
+    _exit_trace("runner_start")
+    try:
+        import faulthandler
+
+        _faulthandler_file = open(
+            os.path.join(STATE_DIR, "faulthandler.log"), "a", encoding="utf-8"
+        )
+        faulthandler.enable(file=_faulthandler_file, all_threads=True)
+    except Exception:
+        pass
     if _should_cleanup_stale_runners():
         _kill_stale_runner_processes()
     unlock(force=True)
     clear_auth_locks()
 
     def _shutdown_on_signal(signum, frame):
+        _exit_trace(f"signal_{signum}_received")
         _stop_auth_health_monitor(join_timeout=1.0)
         unlock(force=True)
         clear_auth_locks()
@@ -8381,6 +8521,10 @@ def _start_server():
 
     signal.signal(signal.SIGTERM, _shutdown_on_signal)
     signal.signal(signal.SIGINT, _shutdown_on_signal)
+    if os.name == "nt":
+        # Windows 控制台事件（含 start_monitor 的 CTRL_BREAK）走 SIGBREAK；
+        # 不注册则默认硬终止，unlock/clear_auth_locks 不会执行。
+        signal.signal(signal.SIGBREAK, _shutdown_on_signal)
 
     server = _bind_runner_server(
         RUNNER_HOST,
@@ -8388,6 +8532,7 @@ def _start_server():
         Handler,
         allow_fallback=_is_tauri_supervised(),
     )
+    _exit_trace(f"bound_port={server.server_port}")
     if _is_tauri_supervised():
         print(_runner_ready_frame(server), flush=True)
         _start_supervised_license_background()
@@ -8396,10 +8541,15 @@ def _start_server():
     _start_auth_health_monitor()
     try:
         server.serve_forever()
+        _exit_trace("serve_forever_returned")
+    except BaseException as exc:
+        _exit_trace(f"serve_forever_exception:{type(exc).__name__}:{exc!r}")
+        raise
     finally:
         _stop_auth_health_monitor()
         unlock(force=True)
         clear_auth_locks()
+        _exit_trace("runner_exit")
 
 
 if __name__ == "__main__":

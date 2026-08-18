@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import hashlib
 import contextlib
-import fcntl
 import json
 import os
 import pathlib
@@ -27,9 +26,19 @@ from urllib.request import Request, urlopen
 from package_identity import read_signed_package_manifest, verify_package_manifest
 from runtime_paths import read_package_id
 
+try:
+    import fcntl
+except ImportError:  # Windows: fcntl 仅用于 macOS 打包版安装流程
+    fcntl = None
 
-UPDATE_PLATFORM = "mac"
-UPDATE_ARCH = "arm64"
+
+UPDATE_PLATFORM = "win" if sys.platform == "win32" else "mac"
+UPDATE_ARCH = "x86_64" if sys.platform == "win32" else "arm64"
+DEFAULT_PACKAGE_ID = (
+    "data-scientist-community-win-x64"
+    if sys.platform == "win32"
+    else "data-scientist-community-mac-arm64"
+)
 UPDATE_DIR_NAME = "updates"
 UPDATE_CHECK_TIMEOUT_SECONDS = 8
 UPDATE_DOWNLOAD_TIMEOUT_SECONDS = 120
@@ -93,7 +102,7 @@ def validate_build_version(value: str) -> str:
 def validate_release(
     payload: dict[str, Any],
     *,
-    expected_package_id: str = "data-scientist-community-mac-arm64",
+    expected_package_id: str = DEFAULT_PACKAGE_ID,
     expected_arch: str = UPDATE_ARCH,
 ) -> ReleaseDescriptor:
     source = payload if isinstance(payload, dict) else {}
@@ -175,7 +184,7 @@ def current_package_info(base_dir: str) -> dict[str, Any]:
     if primary_server and primary_server not in activation_servers:
         activation_servers = [primary_server, *activation_servers]
     return {
-        "package_id": str(payload.get("package_id") or read_package_id(base_dir) or "data-scientist-community-mac-arm64").strip(),
+        "package_id": str(payload.get("package_id") or read_package_id(base_dir) or DEFAULT_PACKAGE_ID).strip(),
         "build_version": str(payload.get("build_version") or _package_json_version(base_dir) or "1.0.0").strip(),
         "platform": UPDATE_PLATFORM,
         "arch": UPDATE_ARCH,
@@ -1678,7 +1687,7 @@ def prepare_verified_dmg_snapshot():
 
 def stop_installed_app_processes():
     marker = str(install_app / "Contents" / "Resources" / "app" / "scripts")
-    result = subprocess.run(["ps", "-axo", "pid=,command="], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, check=False)
+    result = subprocess.run(["ps", "-axo", "pid=,command="], stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, encoding="utf-8", errors="replace", check=False)
     pids = []
     for line in result.stdout.splitlines():
         stripped = line.strip()
@@ -1947,6 +1956,8 @@ def reveal_path(path: str) -> dict[str, Any]:
         return {"ok": False, "error": "file_not_found", "message": "未找到已下载的安装包。"}
     if sys_platform_is_macos():
         subprocess.run(["open", "-R", target], check=False)
+    elif os.name == "nt":
+        subprocess.run(["explorer.exe", f"/select,{target}"], check=False)
     return {"ok": True, "path": target}
 
 

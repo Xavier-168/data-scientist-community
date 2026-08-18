@@ -281,7 +281,7 @@ class FeishuSyncTransactionTests(unittest.TestCase):
                     ],
                 ),
                 patch.object(sync_feishu.signal, "signal"),
-                patch.object(sync_feishu.signal, "alarm"),
+                patch.object(sync_feishu.signal, "alarm", create=True),
             ):
                 result = sync_feishu.sync_all_tables(
                     "app-token",
@@ -319,7 +319,7 @@ class FeishuSyncTransactionTests(unittest.TestCase):
                     },
                 ),
                 patch.object(sync_feishu.signal, "signal"),
-                patch.object(sync_feishu.signal, "alarm"),
+                patch.object(sync_feishu.signal, "alarm", create=True),
             ):
                 result = sync_feishu.sync_all_tables(
                     "app-token",

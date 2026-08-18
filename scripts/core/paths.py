@@ -51,6 +51,15 @@ def resolve_state_dir(base_dir: str | Path, explicit_state_dir: str | Path | Non
         return str(Path(explicit).expanduser().resolve())
 
     base_path = Path(base_dir).resolve()
+    if sys.platform == "win32":
+        # Windows 与 macOS 同理：源码目录/安装目录可能是只读位置，
+        # 也不应承载 Cookie、导出、日志等敏感运行状态，默认放到
+        # 每用户 Roaming 目录（%APPDATA%）。首次运行由
+        # seed_state_from_bundle 把仓库内既有状态播种过去。
+        appdata = os.environ.get("APPDATA") or str(Path.home() / "AppData" / "Roaming")
+        app_support_root = Path(appdata) / APP_SUPPORT_NAME
+        package_id = read_package_id(base_path) if is_packaged_runtime(base_path) else ""
+        return str((app_support_root / package_id) if package_id else app_support_root)
     if sys.platform != "darwin":
         return str(base_path)
 

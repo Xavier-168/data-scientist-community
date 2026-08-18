@@ -573,8 +573,11 @@
     const scale = Math.min(viewportWidth / DASHBOARD_DESIGN_WIDTH, viewportHeight / DASHBOARD_DESIGN_HEIGHT);
     const visualWidth = DASHBOARD_DESIGN_WIDTH * scale;
     const visualHeight = DASHBOARD_DESIGN_HEIGHT * scale;
-    const offsetX = Math.max(0, (viewportWidth - visualWidth) / 2);
-    const offsetY = Math.max(0, (viewportHeight - visualHeight) / 2);
+    // 左上角锚定：缩放已保证画布不超出视口，宽度/高度方向的余量统一留在
+    // 右侧/底部并与阶段背景（侧栏灰、工作区白）自然融合，避免左侧和顶部
+    // 出现信箱式空白条。
+    const offsetX = 0;
+    const offsetY = 0;
     const sidebarEdge = offsetX + (SIDEBAR_DEFAULT_WIDTH * scale);
     app.style.setProperty('--dashboard-scale', String(scale));
     app.style.width = `${DASHBOARD_DESIGN_WIDTH}px`;
@@ -2143,6 +2146,8 @@
        const needsAuth = ['unauthorized', 'expired', 'needs_auth'].includes(String(pData.auth_status || '').trim());
        const isAuthorizing = String(pData.ui_status || '').trim() === 'authorizing';
        const healthText = authHealthDisplay(pData);
+
+
        const safe = (val) => val || 0;
        const collectionState = isEnabled
          ? platformCollectionState(pData)
@@ -2545,6 +2550,7 @@
     }
   });
 
+
   function excelExportChoices() {
     const enabled = Array.isArray(state.config?.enabled_platforms)
       ? state.config.enabled_platforms.filter((platform) => PLATFORMS.includes(platform))
@@ -2701,6 +2707,38 @@
     const status = document.getElementById('excel-export-status');
     if (status) status.textContent = '正在准备' + selection.label + '，请在系统窗口中选择保存位置。';
 
+    // Windows（WebView2）：File System Access API 弹系统保存对话框。监管模式
+    // 下会话令牌只认 X-YRG-Session 请求头，下载必须走带头的 fetch。
+    if (window.showSaveFilePicker) {
+      try {
+        const handle = await window.showSaveFilePicker({
+          suggestedName: payload.suggestedFilename,
+          startIn: 'desktop',
+          types: [{
+            description: 'Excel 工作簿',
+            accept: { 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet': ['.xlsx'] },
+          }],
+        });
+        const excelParams = new URLSearchParams({ file: selection.key });
+        if (platforms.length) excelParams.set('platforms', platforms.join(','));
+        const resp = await fetch(withSessionQuery('/download-excel?' + excelParams.toString()), {
+          headers: { 'X-YRG-Session': SESSION_TOKEN },
+        });
+        if (!resp.ok) throw new Error('HTTP ' + resp.status);
+        const writable = await handle.createWritable();
+        await writable.write(await resp.blob());
+        await writable.close();
+        handleExcelExportResult({ ok: true, file_name: payload.suggestedFilename });
+      } catch (err) {
+        if (err && err.name === 'AbortError') {
+          handleExcelExportResult({ cancelled: true });
+        } else {
+          handleExcelExportResult({ ok: false, message: '保存失败：' + (err.message || err) });
+        }
+      }
+      return;
+    }
+
     const nativeBridge = window.webkit?.messageHandlers?.excelExport;
     if (nativeBridge && typeof nativeBridge.postMessage === 'function') {
       try {
@@ -2734,6 +2772,7 @@
   });
   document.getElementById('modal-excel-export-confirm').addEventListener('click', () => {
     void exportExcelToChosenLocation();
+
   });
 
   document.getElementById('btn-auth-all').addEventListener('click', () => triggerAuthAll());
@@ -3540,6 +3579,13 @@
     }
   });
 </script>
+
+<!-- 导出 Excel：平台选择用原生 dialog（保留用户激活，系统保存对话框才能弹出） -->
+<dialog id="excel-export-dialog" style="border:none;border-radius:12px;padding:24px 28px;min-width:320px;box-shadow:0 12px 40px rgba(0,0,0,.25);">
+  <div style="font-size:16px;font-weight:600;margin-bottom:16px;">选择要导出的数据</div>
+  <div id="excel-export-options" style="display:flex;flex-direction:column;gap:8px;margin-bottom:16px;"></div>
+  <button id="excel-export-cancel" type="button" class="btn btn-secondary" style="width:100%;">取消</button>
+</dialog>
 
 </body>
 </html>

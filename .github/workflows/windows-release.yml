@@ -1,0 +1,67 @@
+name: Windows Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_version:
+        description: "清单 build_version（YYYYMMDD[.N]，默认当天）"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  build-nsis:
+    name: Build NSIS installer
+    runs-on: windows-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up Node.js 22.14
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22.14.0"
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            desktop/package-lock.json
+
+      - name: Set up Rust stable (MSVC)
+        run: rustup toolchain install stable --profile minimal
+
+      - name: Install dependencies
+        shell: bash
+        run: |
+          python -m venv .venv
+          .venv/Scripts/python -m pip install --upgrade pip
+          .venv/Scripts/python -m pip install -r requirements.txt -r requirements-build-windows.txt
+          npm ci
+          npm ci --prefix desktop
+
+      - name: Build Windows release
+        shell: bash
+        env:
+          BUILD_VERSION: ${{ github.event.inputs.build_version }}
+        run: |
+          ARGS=()
+          if [ -n "$BUILD_VERSION" ]; then
+            ARGS+=(--build-version "$BUILD_VERSION")
+          fi
+          .venv/Scripts/python scripts/build_windows_release.py "${ARGS[@]}"
+
+      - name: Upload installer artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-nsis-installer
+          if-no-files-found: error
+          path: |
+            desktop/src-tauri/target/release/bundle/nsis/*.exe

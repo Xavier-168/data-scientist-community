@@ -2,7 +2,6 @@ use std::{
     collections::{BTreeMap, HashSet},
     fs::{File, OpenOptions},
     io::{self, Read, Seek, SeekFrom, Write},
-    os::unix::{ffi::OsStrExt, fs::OpenOptionsExt, process::CommandExt},
     path::Path,
     process::{Command, Stdio},
     str,
@@ -10,9 +9,16 @@ use std::{
     time::{Duration, Instant},
 };
 
+#[cfg(unix)]
+use std::os::unix::{ffi::OsStrExt, fs::OpenOptionsExt, process::CommandExt};
+
+#[cfg(windows)]
+use std::path::PathBuf;
+
 use thiserror::Error;
 
 use crate::manifest::RuntimeDescriptor;
+#[cfg(unix)]
 use object::{
     read::{
         macho::{FatArch as _, MachOFatFile32, MachOFatFile64},
@@ -20,7 +26,17 @@ use object::{
     },
     Architecture, FileKind, Object as _,
 };
+#[cfg(windows)]
+use object::{read::ReadCache, Architecture, FileKind, Object as _};
 use sha2::{Digest, Sha256};
+
+/// 已锚定的目录引用：Unix 为已打开的目录 fd（fd-at 锚定）；
+/// Windows 为校验过的目录路径（std 无法持有目录句柄，依赖唯一临时名
+/// + rename 保证原子性）。
+#[cfg(unix)]
+type DirectoryRef = File;
+#[cfg(windows)]
+type DirectoryRef = PathBuf;
 
 #[derive(Debug, Error)]
 pub enum ArchiveError {
@@ -340,6 +356,7 @@ fn check_cancelled(cancellation: &AtomicBool) -> Result<(), ArchiveError> {
     }
 }
 
+#[cfg(unix)]
 fn open_archive_file(path: &Path) -> Result<File, ArchiveError> {
     let file = OpenOptions::new()
         .read(true)
@@ -351,6 +368,19 @@ fn open_archive_file(path: &Path) -> Result<File, ArchiveError> {
     Ok(file)
 }
 
+/// Windows 版 `open_archive_file`：std 没有 O_NOFOLLOW，先用
+/// symlink_metadata 拒绝符号链接与非常规文件再打开；残余的 TOCTOU
+/// 窗口由后续 sha256/size 描述符校验兜底。
+#[cfg(windows)]
+fn open_archive_file(path: &Path) -> Result<File, ArchiveError> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(ArchiveError::UnsafeEntry(path.display().to_string()));
+    }
+    Ok(File::open(path)?)
+}
+
+#[cfg(unix)]
 fn open_directory_file(path: &Path) -> Result<File, ArchiveError> {
     let file = OpenOptions::new()
         .read(true)
@@ -367,6 +397,18 @@ fn open_directory_file(path: &Path) -> Result<File, ArchiveError> {
     Ok(file)
 }
 
+/// Windows 版 `open_directory_file`：校验目标为非符号链接的真实目录，
+/// 返回目录路径作为锚定引用。
+#[cfg(windows)]
+fn open_directory_file(path: &Path) -> Result<DirectoryRef, ArchiveError> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(ArchiveError::UnsafePath(path.display().to_string()));
+    }
+    Ok(path.to_path_buf())
+}
+
+#[cfg(unix)]
 fn create_verified_snapshot(
     parent: &File,
     path: &Path,
@@ -412,6 +454,58 @@ fn create_verified_snapshot(
         }
         digest.update(&buffer[..read]);
         io::Write::write_all(&mut snapshot, &buffer[..read])?;
+    }
+    if copied != descriptor.size_bytes || snapshot.metadata()?.len() != descriptor.size_bytes {
+        return Err(ArchiveError::SizeMismatch);
+    }
+    if hex::encode(digest.finalize()) != descriptor.sha256 {
+        return Err(ArchiveError::HashMismatch);
+    }
+    snapshot.seek(SeekFrom::Start(0))?;
+    Ok(snapshot)
+}
+
+/// Windows 版 `create_verified_snapshot`：以 create_new 写入唯一临时名，
+/// 校验 sha256/size 后立即删除临时文件（std 以 FILE_SHARE_DELETE 打开，
+/// 删除挂起状态下句柄仍可读），随后所有扫描/解压都基于该私有快照。
+#[cfg(windows)]
+fn create_verified_snapshot(
+    parent: &Path,
+    path: &Path,
+    descriptor: &RuntimeDescriptor,
+    cancellation: &AtomicBool,
+) -> Result<File, ArchiveError> {
+    check_cancelled(cancellation)?;
+    let mut source = open_archive_file(path)?;
+    if source.metadata()?.len() != descriptor.size_bytes {
+        return Err(ArchiveError::SizeMismatch);
+    }
+    let temporary =
+        parent.join(format!(".runtime-snapshot-{}", uuid::Uuid::new_v4()));
+    let mut snapshot = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .open(&temporary)?;
+    std::fs::remove_file(&temporary)?;
+    let mut digest = Sha256::new();
+    let mut copied = 0_u64;
+    // 堆分配缓冲：1MB 栈数组在受限线程（tokio worker 2MB 栈）上会溢出
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    loop {
+        check_cancelled(cancellation)?;
+        let read = source.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        copied = copied
+            .checked_add(read as u64)
+            .ok_or(ArchiveError::SizeMismatch)?;
+        if copied > descriptor.size_bytes {
+            return Err(ArchiveError::SizeMismatch);
+        }
+        digest.update(&buffer[..read]);
+        snapshot.write_all(&buffer[..read])?;
     }
     if copied != descriptor.size_bytes || snapshot.metadata()?.len() != descriptor.size_bytes {
         return Err(ArchiveError::SizeMismatch);
@@ -806,7 +900,8 @@ fn scan_archive_with_hook<F: FnOnce()>(
     let compressed_size = source.metadata()?.len();
     let mut file = tempfile::tempfile()?;
     let mut copied = 0_u64;
-    let mut buffer = [0_u8; 1024 * 1024];
+    // 堆分配缓冲：1MB 栈数组在受限线程（tokio worker 2MB 栈）上会溢出
+    let mut buffer = vec![0_u8; 1024 * 1024];
     loop {
         check_cancelled(cancellation)?;
         let read = source.read(&mut buffer)?;
@@ -851,7 +946,8 @@ fn verify_open_bytes(
     file.seek(SeekFrom::Start(0))?;
     let mut digest = Sha256::new();
     let mut read_bytes = 0_u64;
-    let mut buffer = [0_u8; 1024 * 1024];
+    // 堆分配缓冲：1MB 栈数组在受限线程（tokio worker 2MB 栈）上会溢出
+    let mut buffer = vec![0_u8; 1024 * 1024];
     loop {
         check_cancelled(cancellation)?;
         let read = file.read(&mut buffer)?;
@@ -914,6 +1010,7 @@ fn extraction_record<R: Read>(entry: &mut tar::Entry<'_, R>) -> Result<LayoutRec
     }
 }
 
+#[cfg(unix)]
 fn open_child_directory(parent: &File, name: &str) -> Result<File, ArchiveError> {
     use rustix::fs::{openat, Mode, OFlags};
 
@@ -931,6 +1028,18 @@ fn open_child_directory(parent: &File, name: &str) -> Result<File, ArchiveError>
     Ok(directory)
 }
 
+/// Windows 版 `open_child_directory`：拒绝符号链接后返回子目录路径。
+#[cfg(windows)]
+fn open_child_directory(parent: &Path, name: &str) -> Result<DirectoryRef, ArchiveError> {
+    let child = parent.join(name);
+    let metadata = std::fs::symlink_metadata(&child)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(ArchiveError::UnsafePath(name.into()));
+    }
+    Ok(child)
+}
+
+#[cfg(unix)]
 fn open_relative_parent(root: &File, path: &str) -> Result<(File, String), ArchiveError> {
     canonical_posix_path(path.as_bytes())?;
     let (parent_path, name) = path.rsplit_once('/').unwrap_or(("", path));
@@ -943,10 +1052,26 @@ fn open_relative_parent(root: &File, path: &str) -> Result<(File, String), Archi
     Ok((parent, name.to_owned()))
 }
 
+#[cfg(unix)]
 fn same_stat_identity(left: &rustix::fs::Stat, right: &rustix::fs::Stat) -> bool {
     left.st_dev == right.st_dev && left.st_ino == right.st_ino
 }
 
+/// 拒绝 Windows 驱动器号形式的相对路径（如 "C:foo"）：PathBuf::push
+/// 遇到带前缀的组件会替换整个路径，必须在此挡下。
+#[cfg(windows)]
+fn reject_drive_prefix(path: &str) -> Result<(), ArchiveError> {
+    if path.split('/').any(|part| {
+        part.len() == 2
+            && part.as_bytes()[1] == b':'
+            && part.as_bytes()[0].is_ascii_alphabetic()
+    }) {
+        return Err(ArchiveError::UnsafePath(format!("drive:{path}")));
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 fn extract_record_at<R: Read>(
     entry: &mut tar::Entry<'_, R>,
     record: &LayoutRecord,
@@ -1052,6 +1177,77 @@ fn extract_record_at<R: Read>(
     Ok(())
 }
 
+/// Windows 版 `extract_record_at`：不使用 fd-at 锚定（std 无目录句柄），
+/// 路径安全性由 scan 阶段的 canonical_posix_path + 驱动器号检查保证；
+/// 不设置 unix mode（树哈希校验端使用与构建工具一致的规范化 mode）。
+/// 文件内容在写入目标的同时喂入树哈希 digest。
+#[cfg(windows)]
+fn extract_record_at<R: Read>(
+    entry: &mut tar::Entry<'_, R>,
+    record: &LayoutRecord,
+    destination: &Path,
+    cancellation: &AtomicBool,
+    digest: &mut Sha256,
+) -> Result<(), ArchiveError> {
+    reject_drive_prefix(&record.path)?;
+    // 正斜杠相对路径可直接 join（Windows 同时接受 / 与 \）。
+    let target = destination.join(&record.path);
+    match &record.kind {
+        LayoutKind::Directory => {
+            if let Err(error) = std::fs::create_dir(&target) {
+                return Err(ArchiveError::Io(error));
+            }
+        }
+        LayoutKind::Regular { size } => {
+            let mut output = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&target)?;
+            let mut remaining = *size;
+            // 堆分配缓冲：1MB 栈数组在受限线程（tokio worker 2MB 栈）上会溢出
+            let mut buffer = vec![0_u8; 1024 * 1024];
+            while remaining != 0 {
+                check_cancelled(cancellation)?;
+                let maximum = usize::try_from(remaining.min(buffer.len() as u64))
+                    .map_err(|_| ArchiveError::Limit(format!("file_size:{}", record.path)))?;
+                let read = entry.read(&mut buffer[..maximum]).map_err(stream_error)?;
+                if read == 0 {
+                    return Err(ArchiveError::UnsafeEntry(format!(
+                        "truncated:{}",
+                        record.path
+                    )));
+                }
+                output.write_all(&buffer[..read])?;
+                digest.update(&buffer[..read]);
+                remaining -= read as u64;
+            }
+            if entry.read(&mut [0_u8; 1]).map_err(stream_error)? != 0 {
+                return Err(ArchiveError::UnsafeEntry(format!(
+                    "oversized:{}",
+                    record.path
+                )));
+            }
+            output.sync_all()?;
+            if output.metadata()?.len() != *size {
+                return Err(ArchiveError::UnsafeEntry(format!(
+                    "changed:{}",
+                    record.path
+                )));
+            }
+        }
+        LayoutKind::Symlink { .. } => {
+            // Windows 运行时包不包含符号链接（构建脚本仅写入文件/目录）；
+            // 创建符号链接还需要特权，因此直接拒绝。
+            return Err(ArchiveError::UnsafeEntry(format!(
+                "symlink_unsupported:{}",
+                record.path
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 fn extract_open_archive(
     file: &mut File,
     compressed_size: u64,
@@ -1097,6 +1293,73 @@ fn extract_open_archive(
     Ok(())
 }
 
+/// Windows 版 `extract_open_archive`：解压循环与 Unix 相同，但树哈希在
+/// 写入时同步累计——kind/mode/length 取自 tar 条目（'D' 目录 / 'F' 文件），
+/// 文件内容边写边喂入 digest。返回最终树哈希（hex）。
+#[cfg(windows)]
+fn extract_open_archive(
+    file: &mut File,
+    compressed_size: u64,
+    scan: &ScanResult,
+    destination: &Path,
+    cancellation: &AtomicBool,
+    limits: ArchiveLimits,
+) -> Result<String, ArchiveError> {
+    file.seek(SeekFrom::Start(0))?;
+    let maximum = compressed_size
+        .checked_mul(limits.expansion_ratio)
+        .and_then(|value| value.checked_add(limits.expansion_allowance))
+        .ok_or_else(|| ArchiveError::Limit("expansion_ratio".into()))?;
+    let decoder = zstd::stream::read::Decoder::new(file).map_err(stream_error)?;
+    let reader = CancellableReader::new(decoder, cancellation, maximum);
+    let mut archive = tar::Archive::new(reader);
+    let mut extracted = HashSet::new();
+    let mut digest = Sha256::new();
+    {
+        let entries = archive.entries().map_err(stream_error)?;
+        for item in entries {
+            check_cancelled(cancellation)?;
+            let mut entry = item.map_err(stream_error)?;
+            let record = extraction_record(&mut entry)?;
+            let expected = scan
+                .layout
+                .entries
+                .get(&record.path)
+                .ok_or_else(|| ArchiveError::UnsafeEntry(format!("changed:{}", record.path)))?;
+            if expected != &record || !extracted.insert(record.path.clone()) {
+                return Err(ArchiveError::UnsafeEntry(format!(
+                    "changed:{}",
+                    record.path
+                )));
+            }
+            let relative = record.path.as_bytes();
+            let (kind, payload_length) = match &record.kind {
+                LayoutKind::Symlink { target } => (b'L', target.len() as u64),
+                LayoutKind::Directory => (b'D', 0),
+                LayoutKind::Regular { size } => (b'F', *size),
+            };
+            digest.update([kind]);
+            hash_length(&mut digest, relative.len() as u64);
+            digest.update(relative);
+            digest.update(record.mode.to_le_bytes());
+            hash_length(&mut digest, payload_length);
+            match &record.kind {
+                // 目录在 extract_record_at 内创建；文件内容写入时喂入 digest。
+                LayoutKind::Symlink { target } => digest.update(target.as_bytes()),
+                _ => {
+                    extract_record_at(&mut entry, &record, destination, cancellation, &mut digest)?;
+                }
+            }
+        }
+    }
+    let mut reader = archive.into_inner();
+    io::copy(&mut reader, &mut io::sink()).map_err(stream_error)?;
+    if extracted.len() != scan.entry_count {
+        return Err(ArchiveError::UnsafeEntry("entry_count_changed".into()));
+    }
+    Ok(hex::encode(digest.finalize()))
+}
+
 fn validate_single_name(name: &str) -> Result<(), ArchiveError> {
     if canonical_posix_path(name.as_bytes())? != name || name.contains('/') {
         return Err(ArchiveError::UnsafePath(name.into()));
@@ -1104,6 +1367,7 @@ fn validate_single_name(name: &str) -> Result<(), ArchiveError> {
     Ok(())
 }
 
+#[cfg(unix)]
 fn remove_directory_contents_at(directory: &File, depth: usize) -> Result<(), ArchiveError> {
     use rustix::fs::{fstat, openat, statat, unlinkat, AtFlags, Dir, FileType, Mode, OFlags};
 
@@ -1153,6 +1417,7 @@ fn remove_directory_contents_at(directory: &File, depth: usize) -> Result<(), Ar
     Ok(())
 }
 
+#[cfg(unix)]
 fn cleanup_destination_at(
     trusted_parent: &File,
     destination_name: &str,
@@ -1186,6 +1451,7 @@ fn cleanup_destination_at(
     Ok(())
 }
 
+#[cfg(unix)]
 fn setup_failure_with_empty_cleanup(
     trusted_parent: &File,
     destination_name: &str,
@@ -1204,6 +1470,51 @@ fn setup_failure_with_empty_cleanup(
     }
 }
 
+/// Windows 版递归清空目录（无 inode 锚定，直接按 readdir 逐项删除）。
+#[cfg(windows)]
+fn remove_directory_contents_at(directory: &Path, depth: usize) -> Result<(), ArchiveError> {
+    if depth > MAX_TREE_DEPTH {
+        return Err(ArchiveError::Limit("cleanup_depth".into()));
+    }
+    for item in std::fs::read_dir(directory)? {
+        let item = item?;
+        let full = directory.join(item.file_name());
+        // DirEntry::file_type 不跟随符号链接（删除链接本身）。
+        if item.file_type()?.is_dir() {
+            remove_directory_contents_at(&full, depth + 1)?;
+            std::fs::remove_dir(&full)?;
+        } else {
+            std::fs::remove_file(&full)?;
+        }
+    }
+    Ok(())
+}
+
+/// Windows 版 `cleanup_destination_at`：解压失败后递归移除 staging 目录。
+#[cfg(windows)]
+fn cleanup_destination_at(destination: &Path) -> Result<(), ArchiveError> {
+    remove_directory_contents_at(destination, 0)?;
+    std::fs::remove_dir(destination)?;
+    Ok(())
+}
+
+/// Windows 版 `setup_failure_with_empty_cleanup`：staging 目录创建后、
+/// 写入前的失败按空目录回收。
+#[cfg(windows)]
+fn setup_failure_with_empty_cleanup(
+    primary: ArchiveError,
+    destination: &Path,
+) -> ArchiveError {
+    match std::fs::remove_dir(destination) {
+        Ok(()) => primary,
+        Err(cleanup) => ArchiveError::Cleanup {
+            primary: Box::new(primary),
+            cleanup: cleanup.to_string(),
+        },
+    }
+}
+
+#[cfg(unix)]
 fn extract_verified_at_with_hooks<F: FnOnce(), G: FnOnce()>(
     path: &Path,
     descriptor: &RuntimeDescriptor,
@@ -1316,6 +1627,7 @@ fn extract_verified_at_with_hooks<F: FnOnce(), G: FnOnce()>(
     }
 }
 
+#[cfg(unix)]
 pub fn extract_verified_at(
     path: &Path,
     descriptor: &RuntimeDescriptor,
@@ -1334,6 +1646,97 @@ pub fn extract_verified_at(
     )
 }
 
+/// Windows 版 `extract_verified_at`：trusted_parent 为目录路径。
+#[cfg(windows)]
+pub fn extract_verified_at(
+    path: &Path,
+    descriptor: &RuntimeDescriptor,
+    trusted_parent: &Path,
+    destination_name: &str,
+    cancellation: &AtomicBool,
+) -> Result<(), ArchiveError> {
+    extract_verified_at_with_hooks(
+        path,
+        descriptor,
+        trusted_parent,
+        destination_name,
+        cancellation,
+        || {},
+        || {},
+    )
+}
+
+/// Windows 版验证解压：与 Unix 流程同序——
+/// 1. 先校验包级 sha256/size（写入私有快照后基于快照解压）；
+/// 2. scan 预检 + required_files 图解析；
+/// 3. 创建 staging 目录，边解压边计算树哈希（mode 取自 tar 头）；
+/// 4. 树哈希与 descriptor.tree_sha256 比对，失配则清空 staging 并报
+///    HashMismatch。
+/// Windows 没有 fd 锚定 / fstatvfs，安全性依赖“唯一临时名 + rename”与
+/// 上述哈希校验。
+#[cfg(windows)]
+fn extract_verified_at_with_hooks<F: FnOnce(), G: FnOnce()>(
+    path: &Path,
+    descriptor: &RuntimeDescriptor,
+    trusted_parent: &Path,
+    destination_name: &str,
+    cancellation: &AtomicBool,
+    after_verify: F,
+    after_destination_open: G,
+) -> Result<(), ArchiveError> {
+    let limits = ArchiveLimits::default();
+    validate_single_name(destination_name)?;
+    reject_drive_prefix(destination_name)?;
+    let parent_metadata = std::fs::symlink_metadata(trusted_parent)?;
+    if parent_metadata.file_type().is_symlink() || !parent_metadata.is_dir() {
+        return Err(ArchiveError::UnsafePath(destination_name.into()));
+    }
+    let mut file = create_verified_snapshot(trusted_parent, path, descriptor, cancellation)?;
+    after_verify();
+    let scan = scan_open_archive(&mut file, descriptor.size_bytes, cancellation, limits)?;
+    for required in &descriptor.required_files {
+        let required = required.as_str();
+        canonical_posix_path(required.as_bytes())?;
+        reject_drive_prefix(required)?;
+        scan.layout
+            .resolve_regular(required)
+            .map_err(|_| ArchiveError::RequiredFile(required.to_owned()))?;
+    }
+    check_cancelled(cancellation)?;
+    let destination = trusted_parent.join(destination_name);
+    if let Err(error) = std::fs::create_dir(&destination) {
+        return Err(ArchiveError::Io(error));
+    }
+    let result = (|| {
+        after_destination_open();
+        let tree_sha = extract_open_archive(
+            &mut file,
+            descriptor.size_bytes,
+            &scan,
+            &destination,
+            cancellation,
+            limits,
+        )?;
+        if tree_sha != descriptor.tree_sha256 {
+            return Err(ArchiveError::HashMismatch);
+        }
+        verify_extracted_layout(&destination, &scan.layout, cancellation)?;
+        validate_runtime_tree_at(&destination, &descriptor.required_files, cancellation)?;
+        Ok(())
+    })();
+    match result {
+        Ok(()) => Ok(()),
+        Err(primary) => match cleanup_destination_at(&destination) {
+            Ok(()) => Err(primary),
+            Err(cleanup) => Err(ArchiveError::Cleanup {
+                primary: Box::new(primary),
+                cleanup: cleanup.to_string(),
+            }),
+        },
+    }
+}
+
+#[cfg(unix)]
 fn open_absolute_directory_nofollow(path: &Path) -> Result<File, ArchiveError> {
     use std::path::Component;
 
@@ -1348,6 +1751,37 @@ fn open_absolute_directory_nofollow(path: &Path) -> Result<File, ArchiveError> {
                 let name = str::from_utf8(name.as_bytes())
                     .map_err(|_| ArchiveError::UnsafePath("non_utf8".into()))?;
                 directory = open_child_directory(&directory, name)?;
+            }
+            _ => return Err(ArchiveError::UnsafePath(path.display().to_string())),
+        }
+    }
+    Ok(directory)
+}
+
+/// Windows 版 `open_absolute_directory_nofollow`：逐组件校验路径上没有
+/// 符号链接（reparse point），返回规范化路径作为锚定引用。
+#[cfg(windows)]
+fn open_absolute_directory_nofollow(path: &Path) -> Result<DirectoryRef, ArchiveError> {
+    use std::path::Component;
+
+    if !path.is_absolute() {
+        return Err(ArchiveError::UnsafePath(path.display().to_string()));
+    }
+    let mut directory = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(_) | Component::RootDir => {
+                directory.push(component.as_os_str());
+            }
+            Component::Normal(name) => {
+                let name = name
+                    .to_str()
+                    .ok_or_else(|| ArchiveError::UnsafePath("non_utf8".into()))?;
+                directory.push(name);
+                let metadata = std::fs::symlink_metadata(&directory)?;
+                if metadata.file_type().is_symlink() || !metadata.is_dir() {
+                    return Err(ArchiveError::UnsafePath(path.display().to_string()));
+                }
             }
             _ => return Err(ArchiveError::UnsafePath(path.display().to_string())),
         }
@@ -1392,6 +1826,7 @@ fn extract_verified(
     extract_verified_with_hook(path, descriptor, destination, cancellation, || {})
 }
 
+#[cfg(unix)]
 #[derive(Clone, Debug)]
 struct AnchoredEntry {
     record: LayoutRecord,
@@ -1399,6 +1834,7 @@ struct AnchoredEntry {
     inode: u64,
 }
 
+#[cfg(unix)]
 fn enumerate_directory_at(
     directory: &File,
     prefix: &str,
@@ -1509,6 +1945,7 @@ fn enumerate_directory_at(
     Ok(())
 }
 
+#[cfg(unix)]
 fn enumerate_tree_at(
     root: &File,
     ignore_install_marker: bool,
@@ -1529,6 +1966,117 @@ fn enumerate_tree_at(
     Ok(entries)
 }
 
+/// Windows 树哈希 mode 契约（与 scripts/build_windows_runtime.py 的
+/// EXECUTABLE_SUFFIXES 规则一致）：目录 0o755；文件名（小写）以
+/// .exe/.dll/.bat/.cmd/.ps1 结尾 0o755；其余文件 0o644。
+/// 提取阶段忽略 tar mode，因此校验端必须使用同一规范化规则。
+#[cfg(windows)]
+fn canonical_windows_mode(relative_path: &str, is_directory: bool) -> u32 {
+    if is_directory {
+        return 0o755;
+    }
+    let lower = relative_path.to_ascii_lowercase();
+    if [".exe", ".dll", ".bat", ".cmd", ".ps1"]
+        .iter()
+        .any(|suffix| lower.ends_with(suffix))
+    {
+        0o755
+    } else {
+        0o644
+    }
+}
+
+/// Windows 目录枚举：std::fs 递归遍历，按相对路径字节序（正斜杠）排序
+/// 写入 BTreeMap；mode 取自上面的规范化契约。
+#[cfg(windows)]
+fn enumerate_directory_windows(
+    directory: &Path,
+    prefix: &str,
+    depth: usize,
+    ignore_install_marker: bool,
+    cancellation: &AtomicBool,
+    entries: &mut BTreeMap<String, LayoutRecord>,
+) -> Result<(), ArchiveError> {
+    if depth > MAX_TREE_DEPTH {
+        return Err(ArchiveError::Limit("tree_depth".into()));
+    }
+    let mut names = Vec::new();
+    for item in std::fs::read_dir(directory)? {
+        check_cancelled(cancellation)?;
+        let item = item?;
+        let name = item
+            .file_name()
+            .into_string()
+            .map_err(|_| ArchiveError::UnsafePath("tree_non_utf8".into()))?;
+        validate_single_name(&name)?;
+        names.push(name);
+    }
+    names.sort();
+    for name in names {
+        check_cancelled(cancellation)?;
+        let path = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}/{name}")
+        };
+        if ignore_install_marker
+            && matches!(path.as_str(), RUNTIME_MARKER_NAME | RUNTIME_PROVENANCE_NAME)
+        {
+            continue;
+        }
+        if entries.len() >= MAX_ENTRIES || path.len() > MAX_PATH_BYTES {
+            return Err(ArchiveError::Limit("tree_entries".into()));
+        }
+        let full = directory.join(&name);
+        let metadata = std::fs::symlink_metadata(&full)?;
+        let file_type = metadata.file_type();
+        let record = if file_type.is_symlink() {
+            let target = std::fs::read_link(&full)?;
+            let target = target
+                .to_str()
+                .ok_or_else(|| {
+                    ArchiveError::UnsafePath(format!("tree_link_non_utf8:{path}"))
+                })?
+                .to_owned();
+            LayoutRecord::symlink(&path, &target, canonical_windows_mode(&path, false))
+        } else if file_type.is_dir() {
+            enumerate_directory_windows(
+                &full,
+                &path,
+                depth + 1,
+                ignore_install_marker,
+                cancellation,
+                entries,
+            )?;
+            LayoutRecord::directory(&path, canonical_windows_mode(&path, true))
+        } else if file_type.is_file() {
+            LayoutRecord::regular(&path, metadata.len(), canonical_windows_mode(&path, false))
+        } else {
+            return Err(ArchiveError::UnsafeEntry(format!("tree_type:{path}")));
+        };
+        if entries.insert(path.clone(), record).is_some() {
+            return Err(ArchiveError::UnsafeEntry(format!("tree_duplicate:{path}")));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn enumerate_tree_at(
+    root: &Path,
+    ignore_install_marker: bool,
+    cancellation: &AtomicBool,
+) -> Result<BTreeMap<String, LayoutRecord>, ArchiveError> {
+    let metadata = std::fs::symlink_metadata(root)?;
+    if metadata.file_type().is_symlink() || !metadata.is_dir() {
+        return Err(ArchiveError::UnsafePath("runtime_root".into()));
+    }
+    let mut entries = BTreeMap::new();
+    enumerate_directory_windows(root, "", 0, ignore_install_marker, cancellation, &mut entries)?;
+    Ok(entries)
+}
+
+#[cfg(unix)]
 fn verify_extracted_layout(
     destination: &File,
     expected: &ArchiveLayout,
@@ -1551,6 +2099,32 @@ fn verify_extracted_layout(
     Ok(())
 }
 
+/// Windows 版 `verify_extracted_layout`：重新枚举（规范化 mode）与
+/// scan 布局比对；一致构建（构建工具保证 tar mode == 规范化 mode）。
+#[cfg(windows)]
+fn verify_extracted_layout(
+    destination: &Path,
+    expected: &ArchiveLayout,
+    cancellation: &AtomicBool,
+) -> Result<(), ArchiveError> {
+    let actual = enumerate_tree_at(destination, false, cancellation)?;
+    if actual.len() != expected.entries.len() {
+        return Err(ArchiveError::UnsafeEntry("post_extract_entry_count".into()));
+    }
+    for (path, expected_record) in &expected.entries {
+        let actual_record = actual
+            .get(path)
+            .ok_or_else(|| ArchiveError::UnsafeEntry(format!("post_extract_missing:{path}")))?;
+        if actual_record != expected_record {
+            return Err(ArchiveError::UnsafeEntry(format!(
+                "post_extract_changed:{path}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
 fn open_regular_at(root: &File, path: &str) -> Result<File, ArchiveError> {
     use rustix::fs::{fstat, openat, FileType, Mode, OFlags};
 
@@ -1570,10 +2144,28 @@ fn open_regular_at(root: &File, path: &str) -> Result<File, ArchiveError> {
     Ok(file)
 }
 
+/// Windows 版 `open_regular_at`：拒绝符号链接后以只读打开普通文件。
+#[cfg(windows)]
+fn open_regular_at(root: &Path, path: &str) -> Result<File, ArchiveError> {
+    let full = root.join(path);
+    let metadata = std::fs::symlink_metadata(&full).map_err(ArchiveError::Io)?;
+    if metadata.file_type().is_symlink() || !metadata.is_file() {
+        return Err(ArchiveError::UnsafeEntry(format!("not_regular:{path}")));
+    }
+    File::open(&full).map_err(ArchiveError::Io)
+}
+
+#[cfg(unix)]
 fn object_error(error: object::Error) -> ArchiveError {
     ArchiveError::UnsafeEntry(format!("macho:{error}"))
 }
 
+#[cfg(windows)]
+fn object_error(error: object::Error) -> ArchiveError {
+    ArchiveError::UnsafeEntry(format!("pe:{error}"))
+}
+
+#[cfg(unix)]
 fn macho_arm64_status(mut file: File) -> Result<Option<bool>, ArchiveError> {
     let mut magic = [0_u8; 4];
     let read = file.read(&mut magic)?;
@@ -1640,11 +2232,36 @@ fn macho_arm64_status(mut file: File) -> Result<Option<bool>, ArchiveError> {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 fn is_arm64_macho(path: &Path) -> Result<bool, ArchiveError> {
     Ok(macho_arm64_status(open_archive_file(path)?)?.unwrap_or(false))
 }
 
+/// Windows 架构门禁：读取 PE 头判断 Machine 是否为
+/// IMAGE_FILE_MACHINE_AMD64（0x8664）。非 PE 文件（如脚本/资源）返回
+/// Ok(None)，不参与门禁；是 PE 但解析失败则报错。
+#[cfg(windows)]
+fn pe_x86_64_status(mut file: File) -> Result<Option<bool>, ArchiveError> {
+    let mut magic = [0_u8; 2];
+    let read = file.read(&mut magic)?;
+    file.seek(SeekFrom::Start(0))?;
+    // PE 以 DOS 头 'MZ' 开头。
+    if read != magic.len() || magic != [b'M', b'Z'] {
+        return Ok(None);
+    }
+    let cache = ReadCache::new(file);
+    match FileKind::parse(&cache).map_err(object_error)? {
+        FileKind::Pe32 | FileKind::Pe64 => Ok(Some(
+            object::File::parse(&cache)
+                .map_err(object_error)?
+                .architecture()
+                == Architecture::X86_64,
+        )),
+        _ => Err(ArchiveError::UnsafeEntry("pe:kind".into())),
+    }
+}
+
+#[cfg(unix)]
 fn terminate_process_group(child: &mut std::process::Child) {
     use nix::{
         sys::signal::{killpg, Signal},
@@ -1664,6 +2281,13 @@ fn terminate_process_group(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
+/// Windows 版终止：直接 kill()（无进程组；Job Object 由平台层负责）。
+#[cfg(windows)]
+fn terminate_process_group(child: &mut std::process::Child) {
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
 fn smoke_version_with_timeout(
     path: &Path,
     cancellation: &AtomicBool,
@@ -1675,8 +2299,16 @@ fn smoke_version_with_timeout(
         .arg("--version")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .process_group(0);
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    command.process_group(0);
+    #[cfg(windows)]
+    {
+        // CREATE_NO_WINDOW：避免控制台窗口闪现。
+        use std::os::windows::process::CommandExt;
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        command.creation_flags(CREATE_NO_WINDOW);
+    }
     let mut child = command.spawn()?;
     let deadline = Instant::now() + timeout;
     loop {
@@ -1686,11 +2318,14 @@ fn smoke_version_with_timeout(
         }
         if let Some(status) = child.try_wait()? {
             let code = status.code().unwrap_or(-1);
-            // A --version command must not leave descendants behind.
-            let _ = nix::sys::signal::killpg(
-                nix::unistd::Pid::from_raw(child.id() as i32),
-                nix::sys::signal::Signal::SIGKILL,
-            );
+            #[cfg(unix)]
+            {
+                // A --version command must not leave descendants behind.
+                let _ = nix::sys::signal::killpg(
+                    nix::unistd::Pid::from_raw(child.id() as i32),
+                    nix::sys::signal::Signal::SIGKILL,
+                );
+            }
             return Ok(code);
         }
         if Instant::now() >= deadline {
@@ -1701,6 +2336,7 @@ fn smoke_version_with_timeout(
     }
 }
 
+#[cfg(unix)]
 fn is_required_binary_name(name: &str) -> bool {
     matches!(
         name,
@@ -1708,10 +2344,22 @@ fn is_required_binary_name(name: &str) -> bool {
     )
 }
 
+/// Windows 必需二进制名。仅覆盖解释器入口：
+/// - 冒烟测试只运行 python.exe / node.exe；
+/// - chrome.exe / headless_shell.exe 不参与（Chrome for Testing 在 Windows 上
+///   `--version` 不会快速退出而会拉起完整浏览器组件，且从 AppData 拉起
+///   浏览器可执行文件会触发 Defender 干预，曾导致整个进程冻结）。
+///   浏览器完整性由包级 sha256 + 树哈希保证。
+#[cfg(windows)]
+fn is_required_binary_name(name: &str) -> bool {
+    matches!(name, "python.exe" | "node.exe")
+}
+
 pub fn validate_runtime_tree(root: &Path, required_files: &[String]) -> Result<(), ArchiveError> {
     validate_runtime_tree_cancellable(root, required_files, &AtomicBool::new(false))
 }
 
+#[cfg(unix)]
 fn validate_opened_entry(
     file: &File,
     entry: &AnchoredEntry,
@@ -1735,6 +2383,7 @@ fn validate_opened_entry(
     Ok(())
 }
 
+#[cfg(unix)]
 fn validate_runtime_tree_at(
     root: &File,
     required_files: &[String],
@@ -1798,6 +2447,75 @@ fn validate_runtime_tree_at(
     Ok(())
 }
 
+/// Windows 版运行时树校验：
+/// - 枚举（规范化 mode）并重建链接图；
+/// - 所有普通文件过 PE 架构门禁（非 PE 跳过；PE 必须为 x86_64）；
+/// - required_files 必须解析到内部普通文件；可执行入口（python.exe /
+///   node.exe / chrome.exe / headless_shell.exe）执行 `--version` 冒烟
+///   （CREATE_NO_WINDOW + 超时 kill）。
+#[cfg(windows)]
+fn validate_runtime_tree_at(
+    root: &Path,
+    required_files: &[String],
+    cancellation: &AtomicBool,
+) -> Result<(), ArchiveError> {
+    let entries = enumerate_tree_at(root, true, cancellation)?;
+    let layout =
+        ArchiveLayout::from_records(entries.values().map(|record| record.clone()).collect())?;
+
+    for (path, record) in &entries {
+        check_cancelled(cancellation)?;
+        if !matches!(record.kind, LayoutKind::Regular { .. }) {
+            continue;
+        }
+        // 仅对已知主二进制做 PE 架构门禁（与 macOS 的命名门禁对齐）。
+        // 依赖包内可能携带 32 位辅助程序（如 pip 的 distlib/t32.exe），
+        // 它们不是运行时入口，不参与门禁。
+        let name = path.rsplit('/').next().unwrap_or_default();
+        if !is_required_binary_name(name) {
+            continue;
+        }
+        if pe_x86_64_status(open_regular_at(root, path)?)? == Some(false) {
+            return Err(ArchiveError::RequiredFile(format!("{path}:not_x86_64")));
+        }
+    }
+
+    for required in required_files {
+        check_cancelled(cancellation)?;
+        let required = required.as_str();
+        canonical_posix_path(required.as_bytes())?;
+        reject_drive_prefix(required)?;
+        let resolved = layout
+            .resolve_regular(required)
+            .map_err(|_| ArchiveError::RequiredFile(required.to_owned()))?;
+        let entry = entries
+            .get(&resolved)
+            .ok_or_else(|| ArchiveError::RequiredFile(required.to_owned()))?;
+        let name = required.rsplit('/').next().unwrap_or_default();
+        let executable = is_required_binary_name(name) || required.ends_with(".exe");
+        if executable && entry.mode & 0o111 == 0 {
+            return Err(ArchiveError::RequiredFile(format!(
+                "{required}:not_executable"
+            )));
+        }
+        if is_required_binary_name(name) {
+            let smoke_path = root.join(&resolved);
+            let exit_code = smoke_version_with_timeout(
+                &smoke_path,
+                cancellation,
+                Duration::from_secs(5),
+            )?;
+            if exit_code != 0 {
+                return Err(ArchiveError::SmokeFailed {
+                    path: required.to_owned(),
+                    exit_code,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn validate_runtime_tree_cancellable(
     root: &Path,
     required_files: &[String],
@@ -1830,6 +2548,7 @@ pub fn runtime_tree_sha256_cancellable(
     runtime_tree_sha256_at(&root, cancellation)
 }
 
+#[cfg(unix)]
 fn runtime_tree_sha256_at(root: &File, cancellation: &AtomicBool) -> Result<String, ArchiveError> {
     use rustix::fs::fstat;
 
@@ -1885,6 +2604,60 @@ fn runtime_tree_sha256_at(root: &File, cancellation: &AtomicBool) -> Result<Stri
     Ok(hex::encode(digest.finalize()))
 }
 
+/// Windows 版树哈希：对真实目录做 std::fs 遍历，条目按相对路径字节序
+/// （正斜杠）排序；每项写入 类型字节 + u64le(路径长) + 路径 +
+/// u32le(mode) + u64le(负载长) + 负载。mode 使用与
+/// scripts/build_windows_runtime.py 一致的规范化规则（见
+/// canonical_windows_mode），因为提取阶段不保留 unix mode。
+#[cfg(windows)]
+fn runtime_tree_sha256_at(
+    root: &Path,
+    cancellation: &AtomicBool,
+) -> Result<String, ArchiveError> {
+    let entries = enumerate_tree_at(root, true, cancellation)?;
+    ArchiveLayout::from_records(entries.values().map(|record| record.clone()).collect())?;
+    let mut digest = Sha256::new();
+    // 堆分配缓冲：避免受限线程栈溢出
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    for (path, record) in entries {
+        check_cancelled(cancellation)?;
+        let relative = path.as_bytes();
+        let (kind, payload_length) = match &record.kind {
+            LayoutKind::Symlink { target } => (b'L', target.len() as u64),
+            LayoutKind::Directory => (b'D', 0),
+            LayoutKind::Regular { size } => (b'F', *size),
+        };
+        digest.update([kind]);
+        hash_length(&mut digest, relative.len() as u64);
+        digest.update(relative);
+        digest.update(record.mode.to_le_bytes());
+        hash_length(&mut digest, payload_length);
+        match &record.kind {
+            LayoutKind::Symlink { target } => digest.update(target.as_bytes()),
+            LayoutKind::Directory => {}
+            LayoutKind::Regular { size } => {
+                let mut file = open_regular_at(root, &path)?;
+                let mut remaining = *size;
+                while remaining != 0 {
+                    check_cancelled(cancellation)?;
+                    let maximum = usize::try_from(remaining.min(buffer.len() as u64))
+                        .map_err(|_| ArchiveError::Limit(format!("tree_size:{path}")))?;
+                    let read = file.read(&mut buffer[..maximum])?;
+                    if read == 0 {
+                        return Err(ArchiveError::UnsafeEntry(format!("tree_truncated:{path}")));
+                    }
+                    digest.update(&buffer[..read]);
+                    remaining -= read as u64;
+                }
+                if file.read(&mut [0_u8; 1])? != 0 {
+                    return Err(ArchiveError::UnsafeEntry(format!("tree_oversized:{path}")));
+                }
+            }
+        }
+    }
+    Ok(hex::encode(digest.finalize()))
+}
+
 pub fn verify_installed_runtime(
     root: &Path,
     descriptor: &RuntimeDescriptor,
@@ -1902,7 +2675,7 @@ pub fn verify_installed_runtime_cancellable(
 }
 
 pub(super) fn verify_installed_runtime_at(
-    root: &File,
+    root: &DirectoryRef,
     descriptor: &RuntimeDescriptor,
     cancellation: &AtomicBool,
 ) -> Result<(), ArchiveError> {
@@ -1920,17 +2693,15 @@ pub(super) fn verify_installed_runtime_at(
     validate_runtime_tree_at(root, &descriptor.required_files, cancellation)
 }
 
-#[cfg(test)]
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
     use crate::manifest::RuntimeDescriptor;
     use sha2::{Digest, Sha256};
-    use std::{
-        io::Cursor,
-        os::unix::fs::PermissionsExt,
-        path::Path,
-        time::{Duration, Instant},
-    };
+    use std::{io::Cursor, path::Path, time::{Duration, Instant}};
+
+    #[cfg(unix)]
+    use std::os::unix::fs::PermissionsExt;
 
     fn append_fixture(
         builder: &mut tar::Builder<Vec<u8>>,
@@ -2046,6 +2817,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     fn thin_macho(cpu_type: u32) -> Vec<u8> {
         let mut bytes = Vec::new();
         bytes.extend_from_slice(&0xfeedfacfu32.to_le_bytes());
@@ -2059,6 +2831,7 @@ mod tests {
         bytes
     }
 
+    #[cfg(unix)]
     fn fat_macho(is_64: bool, cpu_type: u32, slice: &[u8]) -> Vec<u8> {
         let header_size = if is_64 { 40_u64 } else { 28_u64 };
         let mut bytes = Vec::new();
@@ -2492,6 +3265,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn extraction_rejects_a_symlink_in_the_destination_ancestor_chain() {
         use std::os::unix::fs::symlink;
@@ -2520,6 +3294,7 @@ mod tests {
         assert!(!outside.join("runtime").exists());
     }
 
+    #[cfg(unix)]
     #[test]
     fn extraction_stays_anchored_when_the_destination_name_is_replaced() {
         use std::os::unix::fs::symlink;
@@ -2576,6 +3351,7 @@ mod tests {
         ));
     }
 
+    #[cfg(unix)]
     #[test]
     fn archive_fifo_is_rejected_without_blocking() {
         let temp = tempfile::tempdir().unwrap();
@@ -2589,6 +3365,7 @@ mod tests {
         assert!(receiver.recv_timeout(Duration::from_millis(500)).unwrap());
     }
 
+    #[cfg(unix)]
     #[test]
     fn extraction_rejects_required_symlink_unless_it_resolves_to_internal_regular_file() {
         let temp = tempfile::tempdir().unwrap();
@@ -2630,6 +3407,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn extraction_runs_the_required_executable_gate_before_success() {
         let temp = tempfile::tempdir().unwrap();
@@ -2656,6 +3434,7 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
     #[test]
     fn macho_parser_accepts_thin_fat32_and_fat64_arm64_and_rejects_malformed() {
         let temp = tempfile::tempdir().unwrap();
@@ -2676,6 +3455,7 @@ mod tests {
         assert!(is_arm64_macho(&binary).is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn runtime_validation_checks_dylibs_and_propagates_walk_errors() {
         let temp = tempfile::tempdir().unwrap();
@@ -2704,6 +3484,7 @@ mod tests {
         assert!(result.is_err());
     }
 
+    #[cfg(unix)]
     #[test]
     fn runtime_validation_checks_macho_magic_for_every_regular_file() {
         for name in ["extensionless", "addon.node", "plugin.bundle"] {
@@ -2721,6 +3502,7 @@ mod tests {
         }
     }
 
+    #[cfg(unix)]
     #[test]
     fn smoke_timeout_terminates_the_entire_process_group() {
         let temp = tempfile::tempdir().unwrap();
