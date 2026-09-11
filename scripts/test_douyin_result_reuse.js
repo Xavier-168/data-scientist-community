@@ -36,6 +36,41 @@ async function loadDouyinHelpers() {
 async function main() {
   const mod = await loadDouyinHelpers();
 
+  const progressDir = fs.mkdtempSync(path.join(__dirname, ".douyin-progress-test-"));
+  const progressPath = path.join(progressDir, "douyin_progress.json");
+  fs.writeFileSync(progressPath, JSON.stringify({ status: "old" }), "utf8");
+  const realPromises = require("fs/promises");
+  let renameAttempts = 0;
+  const fallbackResult = await mod.writeProgressFileAtomically(
+    progressPath,
+    JSON.stringify({ status: "running", processedWorks: 1 }),
+    {
+      fileSystem: {
+        ...realPromises,
+        rename: async () => {
+          renameAttempts += 1;
+          const error = new Error("operation not permitted");
+          error.code = "EPERM";
+          throw error;
+        },
+      },
+      retryDelaysMs: [0, 0],
+      sleep: async () => {},
+    },
+  );
+  assert.deepStrictEqual(JSON.parse(fs.readFileSync(progressPath, "utf8")), {
+    status: "running",
+    processedWorks: 1,
+  });
+  assert.deepStrictEqual(fallbackResult, { mode: "direct-fallback", attempts: 3 });
+  assert.strictEqual(renameAttempts, 3);
+  assert.strictEqual(
+    fs.readdirSync(progressDir).filter((name) => name.endsWith(".tmp")).length,
+    0,
+    "EPERM fallback must not leave progress temp files behind",
+  );
+  fs.rmSync(progressDir, { recursive: true, force: true });
+
   const reused = mod.buildFinalCompletionPatch(
     {
       totalWorks: 3,

@@ -264,6 +264,51 @@ function newProgressState() {
 
 let progressState = newProgressState();
 
+const PROGRESS_RENAME_RETRY_DELAYS_MS = [40, 80, 160];
+const RETRYABLE_PROGRESS_RENAME_ERRORS = new Set(['EACCES', 'EBUSY', 'EPERM']);
+
+export async function writeProgressFileAtomically(progressPath, serialized, options = {}) {
+  const fileSystem = options.fileSystem ?? fs;
+  const sleep = typeof options.sleep === 'function'
+    ? options.sleep
+    : (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs));
+  const retryDelaysMs = Array.isArray(options.retryDelaysMs)
+    ? options.retryDelaysMs
+    : PROGRESS_RENAME_RETRY_DELAYS_MS;
+  const tmpPath = `${progressPath}.${process.pid}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
+
+  await fileSystem.writeFile(tmpPath, serialized, 'utf-8');
+  try {
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await fileSystem.rename(tmpPath, progressPath);
+        return { mode: 'atomic', attempts: attempt + 1 };
+      } catch (error) {
+        const retryable = RETRYABLE_PROGRESS_RENAME_ERRORS.has(String(error?.code || ''));
+        if (!retryable) throw error;
+        if (attempt < retryDelaysMs.length) {
+          await sleep(Math.max(0, Number(retryDelaysMs[attempt]) || 0));
+          continue;
+        }
+
+        // Some macOS-managed folders allow writing the existing file but reject
+        // replacing its directory entry. Keep collection alive with a final
+        // in-place write after bounded atomic-rename retries.
+        await fileSystem.writeFile(progressPath, serialized, 'utf-8');
+        return { mode: 'direct-fallback', attempts: attempt + 1 };
+      }
+    }
+  } finally {
+    try {
+      await fileSystem.unlink(tmpPath);
+    } catch (error) {
+      if (error?.code !== 'ENOENT') {
+        console.warn(`[progress] failed to clean temporary file: ${error.message}`);
+      }
+    }
+  }
+}
+
 async function updateProgress(patch = {}) {
   progressState = {
     ...progressState,
@@ -272,9 +317,10 @@ async function updateProgress(patch = {}) {
     headless: CONFIG.headless,
   };
   await ensureDir(path.dirname(CONFIG.progressPath));
-  const tmpPath = CONFIG.progressPath + '.tmp';
-  await fs.writeFile(tmpPath, JSON.stringify(progressState, null, 2), 'utf-8');
-  await fs.rename(tmpPath, CONFIG.progressPath);
+  await writeProgressFileAtomically(
+    CONFIG.progressPath,
+    JSON.stringify(progressState, null, 2),
+  );
 }
 
 async function cleanProfileLocks(profileDir) {
