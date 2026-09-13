@@ -1,4 +1,5 @@
 import errno
+import html
 import json
 import mimetypes
 import os
@@ -250,6 +251,24 @@ def _is_loopback_host(host: str) -> bool:
     if value.startswith("[") and value.endswith("]"):
         value = value[1:-1]
     return value.lower() == "localhost" or value == "127.0.0.1"
+
+
+def _is_wsl() -> bool:
+    """WSL2 环境检测（Linux 内核带 microsoft 标识）。"""
+    if sys.platform != "linux":
+        return False
+    try:
+        with open("/proc/version", encoding="utf-8", errors="replace") as handle:
+            return "microsoft" in handle.read().lower()
+    except OSError:
+        return False
+
+
+def _is_allowed_bind_host(host: str) -> bool:
+    """默认只允许回环地址；WSL 下额外放行 0.0.0.0 以便 Windows 侧访问。"""
+    if _is_loopback_host(host):
+        return True
+    return _is_wsl() and str(host or "").strip() == "0.0.0.0"
 
 LOCK_STALE_SECONDS = 1800  # 30 minutes (was 8 hours)
 RUN_LEASE_TTL_SECONDS = 120
@@ -698,7 +717,7 @@ def _browser_channel_paths(channel: str) -> list[str]:
                 os.path.join(local_app_data, "Microsoft", "Edge", "Application", "msedge.exe"),
             ],
         }
-    else:
+    elif sys.platform == "darwin":
         channel_paths = {
             "chrome": [
                 "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
@@ -708,6 +727,30 @@ def _browser_channel_paths(channel: str) -> list[str]:
             "msedge": [
                 "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
                 "/usr/bin/microsoft-edge",
+            ],
+        }
+    else:
+        # Linux / WSL：优先 PATH 中的浏览器，其次常见安装路径
+        which = {
+            "chrome": next(
+                (path for path in (shutil.which(name) for name in ("google-chrome", "google-chrome-stable", "chromium", "chromium-browser")) if path),
+                "",
+            ),
+            "msedge": shutil.which("microsoft-edge") or "",
+        }
+        channel_paths = {
+            "chrome": [
+                which.get("chrome", ""),
+                "/opt/google/chrome/google-chrome",
+                "/usr/bin/google-chrome-stable",
+                "/usr/bin/google-chrome",
+                "/usr/bin/chromium",
+                "/snap/bin/google-chrome",
+            ],
+            "msedge": [
+                which.get("msedge", ""),
+                "/usr/bin/microsoft-edge",
+                "/opt/microsoft/msedge/microsoft-edge",
             ],
         }
     return channel_paths.get(channel, [])
@@ -5306,6 +5349,17 @@ class Handler(BaseHTTPRequestHandler):
             return ""
         if origin in self._allowed_browser_origins():
             return origin
+        # WSL / 局域网可达场景：页面 Origin 与本请求 Host 同源即放行。
+        # 页面必须由本服务加载（Origin 的 host:port 等于请求的 Host），
+        # 跨站恶意页面的 Origin 不匹配，仍会被拒绝。
+        request_host = str(self.headers.get("Host", "") or "").strip()
+        if request_host:
+            try:
+                origin_netloc = urlparse(origin).netloc
+            except ValueError:
+                origin_netloc = ""
+            if origin_netloc == request_host:
+                return origin
         parsed = urlparse(self.path)
         if origin == "null" and self.command == "GET" and parsed.path == "/progress":
             return "null"
@@ -5385,6 +5439,34 @@ class Handler(BaseHTTPRequestHandler):
             )
         except Exception:
             pass
+
+    def _serve_monitor_html(self) -> None:
+        """Serve the monitor dashboard, embedding the session token as a <meta> tag.
+
+        The token is injected server-side so the dashboard works from any client
+        that can reach the runner (e.g. the Windows host in WSL), where the
+        loopback-only /session/recover endpoint would refuse to hand it out.
+        """
+        try:
+            html_text = pathlib.Path(MONITOR_HTML).read_text(encoding="utf-8")
+        except OSError:
+            self._send_json(404, {"ok": False, "error": "not_found"})
+            return
+        if SESSION_TOKEN:
+            meta = '<meta name="yrg-session-token" content="%s">' % (
+                html.escape(str(SESSION_TOKEN), quote=True)
+            )
+            html_text = html_text.replace("<head>", f"<head>\n    {meta}", 1)
+        data = html_text.encode("utf-8")
+        self.send_response(200)
+        self._set_cors_headers()
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
+        self.end_headers()
+        self.wfile.write(data)
 
     def _send_file(self, file_path, content_type=None, as_download=False, cache_control: str | None = None):
         if not os.path.exists(file_path):
@@ -7325,11 +7407,7 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if parsed.path in ("/", "/monitor"):
-            self._send_file(
-                MONITOR_HTML,
-                "text/html; charset=utf-8",
-                cache_control="no-store, no-cache, must-revalidate, max-age=0",
-            )
+            self._serve_monitor_html()
             return
 
         if parsed.path == "/license":
@@ -8267,7 +8345,7 @@ def runner_listen_url(port: int | None = None) -> str:
 
 
 def _bind_runner_server(host: str, preferred_port: int, handler, *, allow_fallback: bool = True):
-    if not _is_loopback_host(host):
+    if not _is_allowed_bind_host(host):
         raise ValueError("runner host must be a loopback address")
     try:
         return ThreadingHTTPServer((host, int(preferred_port)), handler)

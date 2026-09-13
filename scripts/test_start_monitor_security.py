@@ -95,6 +95,7 @@ class StartMonitorSecurityTests(unittest.TestCase):
         )
         with (
             patch.object(start_monitor, "parse_args", return_value=args),
+            patch.object(start_monitor, "_is_wsl", return_value=False),
             patch.object(start_monitor, "seed_state_from_bundle") as seed_state,
             patch.object(start_monitor.subprocess, "Popen") as popen,
         ):
@@ -103,6 +104,16 @@ class StartMonitorSecurityTests(unittest.TestCase):
         self.assertEqual(result, 2)
         seed_state.assert_not_called()
         popen.assert_not_called()
+
+    def test_is_allowed_bind_host_permits_wildcard_only_on_wsl(self):
+        with patch.object(start_monitor, "_is_wsl", return_value=True):
+            self.assertTrue(start_monitor._is_allowed_bind_host("0.0.0.0"))
+            self.assertTrue(start_monitor._is_allowed_bind_host("127.0.0.1"))
+            self.assertTrue(start_monitor._is_allowed_bind_host("localhost"))
+        with patch.object(start_monitor, "_is_wsl", return_value=False):
+            self.assertFalse(start_monitor._is_allowed_bind_host("0.0.0.0"))
+            self.assertTrue(start_monitor._is_allowed_bind_host("127.0.0.1"))
+            self.assertFalse(start_monitor._is_allowed_bind_host("192.168.1.1"))
 
     def test_loopback_host_validation_accepts_only_local_addresses(self):
         for host in ("127.0.0.1", "localhost"):
